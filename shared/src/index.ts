@@ -20,6 +20,19 @@ export type ChatType = 'dm' | 'group';
 
 export type AttachmentKind = 'image' | 'file';
 
+/** The fixed palette of emoji a message may be reacted with. */
+export const REACTION_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🙏'] as const;
+
+/**
+ * One emoji's reactions on a message: the emoji plus the ids of every user who
+ * reacted with it. Groups are ordered by first-reaction time; `userIds` are in
+ * reaction order.
+ */
+export interface ReactionGroupDTO {
+  emoji: string;
+  userIds: number[];
+}
+
 export interface AttachmentDTO {
   id: number;
   kind: AttachmentKind;
@@ -33,6 +46,21 @@ export interface AttachmentDTO {
   hasThumb: boolean;
 }
 
+/**
+ * A compact snapshot of the message a reply quotes. Computed at DTO-assembly time
+ * from the CURRENT state of the original: `content` is trimmed to at most 200
+ * chars, and a tombstoned original collapses to `content: ''` + `isDeleted: true`
+ * (with no attachment flag). The snapshot does NOT live-update — a later edit or
+ * delete of the original is only reflected on the next refetch of the reply.
+ */
+export interface ReplyToDTO {
+  id: number;
+  senderId: number;
+  content: string;
+  isDeleted: boolean;
+  hasAttachments: boolean;
+}
+
 export interface MessageDTO {
   id: number;
   chatId: number;
@@ -41,6 +69,17 @@ export interface MessageDTO {
   /** User ids @-mentioned in this message. */
   mentions: number[];
   attachments: AttachmentDTO[];
+  /**
+   * Emoji reactions grouped by emoji (empty when none). Groups are ordered by
+   * first-reaction time; `userIds` within a group are in reaction order.
+   * Always empty for tombstones.
+   */
+  reactions: ReactionGroupDTO[];
+  /**
+   * The message this one replies to (a snapshot of that message's current state),
+   * or null when it isn't a reply. Always null for tombstones.
+   */
+  replyTo: ReplyToDTO | null;
   /** ISO 8601 */
   createdAt: string;
   /** ISO 8601 of the last edit, or null when never edited. Always null for tombstones. */
@@ -86,6 +125,11 @@ export interface SendMessageRequest {
   mentions?: number[];
   /** Attachments previously uploaded to this chat, linked to this message on send. */
   attachmentIds?: number[];
+  /**
+   * The message being replied to. Must be a live (non-deleted) message in the
+   * same chat, else the send is rejected with 400 'Invalid reply target'.
+   */
+  replyToId?: number;
 }
 
 /** PATCH /api/chats/:chatId/messages/:messageId — edit own message text (attachments are not editable). */

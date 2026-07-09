@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import type { AttachmentDTO, ChatMemberDTO, ChatSummaryDTO, MessageDTO, UserDTO } from '@messenger/shared';
@@ -71,7 +71,7 @@ const me: ChatMemberDTO = { id: 1, email: 'me@example.com', displayName: 'Me', i
 const bob: ChatMemberDTO = { id: 2, email: 'bob@example.com', displayName: 'Bob', isBot: false, lastReadMessageId: 0 };
 
 function msg(id: number, sender: UserDTO, content: string): MessageDTO {
-  return { id, chatId: 10, sender, content, mentions: [], attachments: [], createdAt: new Date(1_700_000_000_000 + id * 1000).toISOString(), editedAt: null, isDeleted: false };
+  return { id, chatId: 10, sender, content, mentions: [], attachments: [], reactions: [], replyTo: null, createdAt: new Date(1_700_000_000_000 + id * 1000).toISOString(), editedAt: null, isDeleted: false };
 }
 
 const dmChat: ChatSummaryDTO = {
@@ -91,6 +91,8 @@ function stubFetch(options: {
   users?: UserDTO[];
   onPost?: (body: unknown) => MessageDTO;
   onPatch?: (body: { content: string; mentions?: number[] }, id: number) => MessageDTO;
+  /** POST /messages/:id/reactions — return the updated message for the toggled emoji. */
+  onReact?: (body: { emoji: string }, id: number) => MessageDTO;
 }) {
   const chat = options.chat ?? dmChat;
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -102,6 +104,15 @@ function stubFetch(options: {
     if (url.endsWith('/leave') && method === 'POST') return jsonResponse(204, {});
     if (url.endsWith('/members') && method === 'PATCH') return jsonResponse(200, { chat });
     if (url.match(/\/api\/chats\/\d+$/)) return jsonResponse(200, { chat });
+    if (url.endsWith('/reactions') && method === 'POST') {
+      const body = JSON.parse(init?.body as string) as { emoji: string };
+      // .../messages/<id>/reactions -> the id is the second-to-last path segment.
+      const id = Number(url.split('/').at(-2));
+      const message = options.onReact
+        ? options.onReact(body, id)
+        : { ...msg(id, me, 'x'), reactions: [{ emoji: body.emoji, userIds: [me.id] }] };
+      return jsonResponse(200, { message });
+    }
     if (url.includes('/messages') && method === 'GET') {
       return jsonResponse(200, { messages: options.messages, nextCursor: null });
     }
@@ -152,6 +163,15 @@ function fileAttachment(id: number, name = 'report.pdf', sizeBytes = 3_355_443):
     height: null,
     hasThumb: false,
   };
+}
+
+/** Mock the scroll container's geometry and fire a scroll event reporting the
+ *  viewport as far from the bottom (helper for jump-to-bottom-pill tests). */
+function scrollAwayFromBottom(scrollEl: HTMLElement) {
+  Object.defineProperty(scrollEl, 'scrollHeight', { value: 2000, configurable: true });
+  Object.defineProperty(scrollEl, 'clientHeight', { value: 400, configurable: true });
+  Object.defineProperty(scrollEl, 'scrollTop', { value: 0, configurable: true });
+  fireEvent.scroll(scrollEl);
 }
 
 function renderChatPage() {
@@ -213,6 +233,8 @@ describe('ChatPage', () => {
       content: 'hey @Me look',
       mentions: [me.id],
       attachments: [],
+      reactions: [],
+      replyTo: null,
       createdAt: new Date(1_700_000_003_000).toISOString(),
       editedAt: null,
       isDeleted: false,
@@ -313,8 +335,11 @@ describe('ChatPage', () => {
 
     await screen.findByText('Original text');
 
-    // Open the actions menu on my own message and pick Edit.
-    await userEvent.click(screen.getByLabelText('Message actions'));
+    // Open the actions menu on my own message and pick Edit. Both messages now
+    // carry an actions affordance (received ones expose the reaction picker), so
+    // scope to my bubble's wrapper to grab the right button.
+    const myWrap = screen.getByText('Original text').closest('.group') as HTMLElement;
+    await userEvent.click(within(myWrap).getByLabelText('Message actions'));
     await userEvent.click(screen.getByRole('menuitem', { name: 'Edit' }));
 
     // Banner appears and the input is prefilled with the original text.
@@ -622,5 +647,366 @@ describe('ChatPage', () => {
     await emitFromServer('chat:removed', { chatId: 10 });
 
     expect(await screen.findByText('Chat list')).toBeInTheDocument();
+  });
+
+  it('renders reaction chips with counts and highlights the one I reacted with', async () => {
+    // 👍 by Bob + me (mine, highlighted); ❤️ by Bob only (not mine).
+    const reacted: MessageDTO = {
+      ...msg(2, bob, 'nice one'),
+      reactions: [
+        { emoji: '👍', userIds: [bob.id, me.id] },
+        { emoji: '❤️', userIds: [bob.id] },
+      ],
+    };
+    stubFetch({ messages: [reacted] });
+    renderChatPage();
+
+    await screen.findByText('nice one');
+
+    // My reaction: count 2, "including you" and the highlighted (blue) styling.
+    const mineChip = screen.getByRole('button', { name: '👍 2, including you' });
+    expect(mineChip.className).toContain('bg-[#0084ff]/10');
+    expect(mineChip).toHaveAttribute('aria-pressed', 'true');
+
+    // Not-my reaction: count 1, no "including you", muted styling.
+    const otherChip = screen.getByRole('button', { name: '❤️ 1' });
+    expect(otherChip.className).toContain('bg-gray-100');
+    expect(otherChip).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it('tapping a reaction chip POSTs the toggle to the reactions endpoint', async () => {
+    const reacted: MessageDTO = {
+      ...msg(2, bob, 'nice one'),
+      reactions: [{ emoji: '👍', userIds: [bob.id] }],
+    };
+    const fetchMock = stubFetch({
+      messages: [reacted],
+      onReact: (body, id) => ({ ...msg(id, bob, 'nice one'), reactions: [{ emoji: body.emoji, userIds: [bob.id, me.id] }] }),
+    });
+    renderChatPage();
+
+    await userEvent.click(await screen.findByRole('button', { name: '👍 1' }));
+
+    const call = fetchMock.mock.calls.find(
+      ([i, init]) => i.toString().endsWith('/messages/2/reactions') && init?.method === 'POST',
+    );
+    expect(call).toBeDefined();
+    expect(JSON.parse(call?.[1]?.body as string)).toEqual({ emoji: '👍' });
+
+    // The server's updated DTO patches the chip in place (now 2, including me).
+    expect(await screen.findByRole('button', { name: '👍 2, including you' })).toBeInTheDocument();
+  });
+
+  it('opens the picker from the actions menu and toggles a reaction', async () => {
+    const fetchMock = stubFetch({
+      messages: [msg(2, bob, 'react to me')],
+      onReact: (body, id) => ({ ...msg(id, bob, 'react to me'), reactions: [{ emoji: body.emoji, userIds: [me.id] }] }),
+    });
+    renderChatPage();
+
+    await screen.findByText('react to me');
+
+    // Open the message actions and pick an emoji from the reaction picker.
+    await userEvent.click(screen.getByLabelText('Message actions'));
+    await userEvent.click(screen.getByRole('menuitem', { name: 'React 👍' }));
+
+    const call = fetchMock.mock.calls.find(
+      ([i, init]) => i.toString().endsWith('/messages/2/reactions') && init?.method === 'POST',
+    );
+    expect(call).toBeDefined();
+    expect(JSON.parse(call?.[1]?.body as string)).toEqual({ emoji: '👍' });
+
+    // The new chip appears (highlighted, since it's now mine).
+    expect(await screen.findByRole('button', { name: '👍 1, including you' })).toBeInTheDocument();
+  });
+
+  it('reply action opens the reply banner naming the target sender', async () => {
+    stubFetch({ messages: [msg(1, bob, 'Hi from Bob')] });
+    renderChatPage();
+
+    await screen.findByText('Hi from Bob');
+
+    await userEvent.click(screen.getByLabelText('Message actions'));
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Reply' }));
+
+    expect(screen.getByText('Replying to Bob')).toBeInTheDocument();
+  });
+
+  it('replying POSTs the message with replyToId and clears the banner on success', async () => {
+    const fetchMock = stubFetch({
+      messages: [msg(1, bob, 'Hi from Bob')],
+      onPost: (body) => ({
+        ...msg(50, me, (body as { content: string }).content),
+        replyTo: { id: 1, senderId: bob.id, content: 'Hi from Bob', isDeleted: false, hasAttachments: false },
+      }),
+    });
+    renderChatPage();
+
+    await screen.findByText('Hi from Bob');
+
+    await userEvent.click(screen.getByLabelText('Message actions'));
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Reply' }));
+    await userEvent.type(screen.getByPlaceholderText('Aa'), 'my reply');
+    await userEvent.click(screen.getByRole('button', { name: /send/i }));
+
+    const postCall = fetchMock.mock.calls.find(
+      ([i, init]) => i.toString().includes('/messages') && init?.method === 'POST',
+    );
+    expect(postCall).toBeDefined();
+    expect(JSON.parse(postCall?.[1]?.body as string)).toEqual({ content: 'my reply', replyToId: 1 });
+
+    // Banner clears once the send resolves.
+    await waitFor(() => expect(screen.queryByText('Replying to Bob')).not.toBeInTheDocument());
+  });
+
+  it('renders a quoted reply block above the bubble content', async () => {
+    const replyMsg: MessageDTO = {
+      ...msg(2, me, 'see my reply'),
+      replyTo: { id: 1, senderId: bob.id, content: 'the quoted snippet', isDeleted: false, hasAttachments: false },
+    };
+    stubFetch({ messages: [msg(1, bob, 'Hi from Bob'), replyMsg] });
+    renderChatPage();
+
+    await screen.findByText('see my reply');
+    const quote = screen.getByRole('button', { name: 'Replying to Bob' });
+    expect(within(quote).getByText('the quoted snippet')).toBeInTheDocument();
+  });
+
+  it('renders a deleted-original quote as "Message deleted"', async () => {
+    const replyMsg: MessageDTO = {
+      ...msg(2, me, 'reply to a deleted one'),
+      replyTo: { id: 1, senderId: bob.id, content: '', isDeleted: true, hasAttachments: false },
+    };
+    stubFetch({ messages: [replyMsg] });
+    renderChatPage();
+
+    await screen.findByText('reply to a deleted one');
+    const quote = screen.getByRole('button', { name: 'Replying to Bob' });
+    expect(within(quote).getByText('Message deleted')).toBeInTheDocument();
+  });
+
+  it('renders an attachment-only original quote as "📎 Attachment"', async () => {
+    const replyMsg: MessageDTO = {
+      ...msg(2, me, 'reply to a photo'),
+      replyTo: { id: 1, senderId: bob.id, content: '', isDeleted: false, hasAttachments: true },
+    };
+    stubFetch({ messages: [replyMsg] });
+    renderChatPage();
+
+    await screen.findByText('reply to a photo');
+    const quote = screen.getByRole('button', { name: 'Replying to Bob' });
+    expect(within(quote).getByText('📎 Attachment')).toBeInTheDocument();
+  });
+
+  it('falls back to "Unknown" when the quoted sender is no longer a member', async () => {
+    const replyMsg: MessageDTO = {
+      ...msg(2, me, 'reply to a ghost'),
+      replyTo: { id: 1, senderId: 999, content: 'gone', isDeleted: false, hasAttachments: false },
+    };
+    stubFetch({ messages: [replyMsg] });
+    renderChatPage();
+
+    await screen.findByText('reply to a ghost');
+    expect(screen.getByRole('button', { name: 'Replying to Unknown' })).toBeInTheDocument();
+  });
+
+  it('tapping the quote scrolls to the loaded original message', async () => {
+    const scrollSpy = vi
+      .spyOn(HTMLElement.prototype, 'scrollIntoView')
+      .mockImplementation(() => {});
+    try {
+      const replyMsg: MessageDTO = {
+        ...msg(2, me, 'reply body'),
+        replyTo: { id: 1, senderId: bob.id, content: 'orig', isDeleted: false, hasAttachments: false },
+      };
+      stubFetch({ messages: [msg(1, bob, 'the original bubble'), replyMsg] });
+      renderChatPage();
+
+      await screen.findByText('reply body');
+      scrollSpy.mockClear(); // ignore the initial auto-scroll-to-bottom
+
+      await userEvent.click(screen.getByRole('button', { name: 'Replying to Bob' }));
+      expect(scrollSpy).toHaveBeenCalled();
+    } finally {
+      scrollSpy.mockRestore();
+    }
+  });
+
+  it('applies a reaction live when a message:updated with reactions arrives', async () => {
+    stubFetch({ messages: [msg(7, bob, 'live react')] });
+    renderChatPage();
+
+    await screen.findByText('live react');
+    expect(screen.queryByRole('button', { name: /😂/ })).not.toBeInTheDocument();
+
+    // Server relays the reaction as a message:updated (no new socket handling needed).
+    await emitFromServer('message:updated', {
+      ...msg(7, bob, 'live react'),
+      reactions: [{ emoji: '😂', userIds: [bob.id] }],
+    });
+
+    expect(await screen.findByRole('button', { name: '😂 1' })).toBeInTheDocument();
+  });
+
+  describe('unread divider', () => {
+    it('renders immediately before the first unread message from another member', async () => {
+      const meRead: ChatMemberDTO = { ...me, lastReadMessageId: 2 };
+      stubFetch({
+        messages: [
+          msg(1, bob, 'read one'),
+          msg(2, me, 'read two'),
+          msg(3, bob, 'first unread'),
+          msg(4, bob, 'second unread'),
+        ],
+        chat: { ...dmChat, members: [meRead, bob] },
+      });
+      renderChatPage();
+
+      await screen.findByText('second unread');
+
+      const divider = screen.getByRole('separator', { name: 'New messages' });
+      const lastRead = screen.getByText('read two');
+      const firstUnread = screen.getByText('first unread');
+
+      // Divider sits strictly between the last read message and the first
+      // unread one — after "read two", before "first unread".
+      expect(
+        lastRead.compareDocumentPosition(divider) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+      expect(
+        divider.compareDocumentPosition(firstUnread) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+    });
+
+    it('renders no divider when everything is already read', async () => {
+      const meRead: ChatMemberDTO = { ...me, lastReadMessageId: 5 };
+      stubFetch({
+        messages: [msg(1, bob, 'old'), msg(2, bob, 'older still')],
+        chat: { ...dmChat, members: [meRead, bob] },
+      });
+      renderChatPage();
+
+      await screen.findByText('older still');
+      expect(screen.queryByRole('separator', { name: 'New messages' })).not.toBeInTheDocument();
+    });
+
+    it('anchors on the first other-sender message when I have read nothing yet', async () => {
+      // lastReadMessageId 0 (the default `me` fixture) means "read nothing":
+      // everything from Bob is unread, so the boundary is his first message.
+      stubFetch({ messages: [msg(1, bob, 'brand new chat'), msg(2, bob, 'second')] });
+      renderChatPage();
+
+      await screen.findByText('second');
+      const divider = screen.getByRole('separator', { name: 'New messages' });
+      const first = screen.getByText('brand new chat');
+      expect(divider.compareDocumentPosition(first) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+
+    it('stays visible after the automatic mark-read read:updated echo arrives (the freeze bug)', async () => {
+      const meRead: ChatMemberDTO = { ...me, lastReadMessageId: 1 };
+      stubFetch({
+        messages: [msg(1, bob, 'already read'), msg(2, bob, 'unread one')],
+        chat: { ...dmChat, members: [meRead, bob] },
+      });
+      renderChatPage();
+
+      await screen.findByText('unread one');
+      expect(screen.getByRole('separator', { name: 'New messages' })).toBeInTheDocument();
+
+      // Simulate the mark-read echo: the server confirms MY OWN read position
+      // advanced to the newest message (fired the instant the chat opened).
+      // A naively live-computed divider would vanish here; the frozen one
+      // must not.
+      await emitFromServer('read:updated', { chatId: 10, userId: me.id, lastReadMessageId: 2 });
+
+      expect(screen.getByRole('separator', { name: 'New messages' })).toBeInTheDocument();
+    });
+  });
+
+  describe('jump-to-bottom pill', () => {
+    it('is hidden by default and appears once a scroll event reports the viewport away from the bottom', async () => {
+      stubFetch({ messages: [msg(1, bob, 'Hi from Bob')] });
+      const { container } = renderChatPage();
+      await screen.findByText('Hi from Bob');
+
+      expect(screen.queryByLabelText('Jump to latest messages')).not.toBeInTheDocument();
+
+      const scrollEl = container.querySelector('[data-testid="message-scroll"]') as HTMLElement;
+      scrollAwayFromBottom(scrollEl);
+
+      expect(await screen.findByLabelText('Jump to latest messages')).toBeInTheDocument();
+    });
+
+    it('increments its "N new" count on a live message from another member while scrolled up, and never for my own', async () => {
+      const fetchMock = stubFetch({
+        messages: [msg(1, bob, 'Hi from Bob')],
+        onPost: (body) => msg(50, me, (body as { content: string }).content),
+      });
+      const { container } = renderChatPage();
+      await screen.findByText('Hi from Bob');
+
+      const scrollEl = container.querySelector('[data-testid="message-scroll"]') as HTMLElement;
+      scrollAwayFromBottom(scrollEl);
+      const pill = await screen.findByLabelText('Jump to latest messages');
+      // No count yet — just the arrow.
+      expect(within(pill).queryByText(/new/)).not.toBeInTheDocument();
+
+      await emitFromServer('message:new', msg(2, bob, 'a new one while scrolled up'));
+      expect(await screen.findByText('1 new')).toBeInTheDocument();
+
+      await emitFromServer('message:new', msg(3, bob, 'another'));
+      expect(await screen.findByText('2 new')).toBeInTheDocument();
+
+      // My own send appends too, but must never bump the count.
+      await userEvent.type(screen.getByPlaceholderText('Aa'), 'mine');
+      await userEvent.click(screen.getByRole('button', { name: /send/i }));
+      await screen.findByText('mine');
+      expect(fetchMock).toHaveBeenCalled();
+      expect(screen.getByText('2 new')).toBeInTheDocument();
+    });
+
+    it('clicking scrolls to the bottom sentinel, resets the count and hides the pill', async () => {
+      const scrollSpy = vi.spyOn(HTMLElement.prototype, 'scrollIntoView').mockImplementation(() => {});
+      try {
+        stubFetch({ messages: [msg(1, bob, 'Hi from Bob')] });
+        const { container } = renderChatPage();
+        await screen.findByText('Hi from Bob');
+        scrollSpy.mockClear(); // ignore the initial auto-scroll-to-bottom
+
+        const scrollEl = container.querySelector('[data-testid="message-scroll"]') as HTMLElement;
+        scrollAwayFromBottom(scrollEl);
+        await emitFromServer('message:new', msg(2, bob, 'while scrolled up'));
+        const pill = await screen.findByLabelText('Jump to latest messages');
+        expect(within(pill).getByText('1 new')).toBeInTheDocument();
+
+        await userEvent.click(pill);
+
+        expect(scrollSpy).toHaveBeenCalledWith({ behavior: 'smooth', block: 'end' });
+        expect(screen.queryByLabelText('Jump to latest messages')).not.toBeInTheDocument();
+      } finally {
+        scrollSpy.mockRestore();
+      }
+    });
+
+    it('resets the count once the viewport scrolls back near the bottom', async () => {
+      stubFetch({ messages: [msg(1, bob, 'Hi from Bob')] });
+      const { container } = renderChatPage();
+      await screen.findByText('Hi from Bob');
+
+      const scrollEl = container.querySelector('[data-testid="message-scroll"]') as HTMLElement;
+      scrollAwayFromBottom(scrollEl);
+      await emitFromServer('message:new', msg(2, bob, 'while scrolled up'));
+      await screen.findByText('1 new');
+
+      // Scroll back near the bottom.
+      Object.defineProperty(scrollEl, 'scrollHeight', { value: 2000, configurable: true });
+      Object.defineProperty(scrollEl, 'clientHeight', { value: 400, configurable: true });
+      Object.defineProperty(scrollEl, 'scrollTop', { value: 1650, configurable: true }); // 2000-1650-400=-50 < 100
+      fireEvent.scroll(scrollEl);
+
+      await waitFor(() =>
+        expect(screen.queryByLabelText('Jump to latest messages')).not.toBeInTheDocument(),
+      );
+    });
   });
 });

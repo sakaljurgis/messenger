@@ -3,6 +3,7 @@ import type { ChatMemberDTO, ChatSummaryDTO, MessageDTO, UserDTO } from '@messen
 import {
   chatInitials,
   chatTitle,
+  firstUnreadMessageId,
   mergeMessages,
   readPositions,
   replaceMessage,
@@ -40,6 +41,8 @@ function msg(id: number, sender: UserDTO, content: string): MessageDTO {
     content,
     mentions: [],
     attachments: [],
+    reactions: [],
+    replyTo: null,
     createdAt: new Date(1_700_000_000_000 + id * 1000).toISOString(),
     editedAt: null,
     isDeleted: false,
@@ -228,5 +231,36 @@ describe('readPositions', () => {
 
   it('returns an empty map when no messages are loaded', () => {
     expect(readPositions([], [bob], ann.id).size).toBe(0);
+  });
+});
+
+describe('firstUnreadMessageId', () => {
+  it('returns the first other-sender message past my last-read id', () => {
+    const messages = [msg(1, bob, 'a'), msg(2, ann, 'b'), msg(3, bob, 'c'), msg(4, bob, 'd')];
+    expect(firstUnreadMessageId(messages, 2, ann.id)).toBe(3);
+  });
+
+  it('treats 0 (never read anything) as everything unread, anchored on the first other-sender message', () => {
+    const messages = [msg(1, bob, 'a'), msg(2, bob, 'b')];
+    expect(firstUnreadMessageId(messages, 0, ann.id)).toBe(1);
+  });
+
+  it('skips my own messages — they are implicitly read', () => {
+    const messages = [msg(1, ann, 'mine'), msg(2, ann, 'also mine'), msg(3, bob, 'first from bob')];
+    expect(firstUnreadMessageId(messages, 0, ann.id)).toBe(3);
+  });
+
+  it('returns null when everything is already read', () => {
+    const messages = [msg(1, bob, 'a'), msg(2, bob, 'b')];
+    expect(firstUnreadMessageId(messages, 2, ann.id)).toBeNull();
+  });
+
+  it('returns null for an empty message list', () => {
+    expect(firstUnreadMessageId([], 0, ann.id)).toBeNull();
+  });
+
+  it('returns null when only my own messages are unread', () => {
+    const messages = [msg(1, bob, 'read'), msg(2, ann, 'mine, unread by the other def but implicitly read')];
+    expect(firstUnreadMessageId(messages, 1, ann.id)).toBeNull();
   });
 });

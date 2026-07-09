@@ -1,10 +1,19 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import type { AttachmentDTO, ChatMemberDTO, MessageDTO, UserDTO } from '@messenger/shared';
+import {
+  REACTION_EMOJIS,
+  type AttachmentDTO,
+  type ChatMemberDTO,
+  type MessageDTO,
+  type ReactionGroupDTO,
+  type ReplyToDTO,
+  type UserDTO,
+} from '@messenger/shared';
 import { useAuth } from '../lib/auth';
 import { splitByMentions } from '../lib/mentions';
 import {
   chatTitle,
+  firstUnreadMessageId,
   formatDaySeparator,
   formatMessageTime,
   markRead,
@@ -42,6 +51,14 @@ function DotsIcon() {
   );
 }
 
+function DownArrowIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m-6-6l6 6 6-6" />
+    </svg>
+  );
+}
+
 /** How long a touch must be held before the actions menu opens (mobile long-press). */
 const LONG_PRESS_MS = 500;
 
@@ -55,18 +72,24 @@ function TombstoneBubble() {
 }
 
 /**
- * Wraps an own, non-deleted bubble with an Edit/Delete affordance: a '⋯' button
+ * Wraps a non-deleted bubble with a message-actions affordance: a '⋯' button
  * that fades in on hover (desktop) and a long-press / right-click on the bubble
- * itself (mobile) — both open a small popover menu. The menu closes on an
- * outside tap/click or Escape.
+ * itself (mobile) — both open a small popover. The popover always leads with the
+ * emoji reaction picker (every member may react); `onReply` (every non-deleted
+ * message) and `onEdit`/`onDelete` (own messages only), when provided, add
+ * Reply/Edit/Delete rows below it. Closes on an outside tap/click or Escape.
  */
 function MessageActions({
+  onReact,
+  onReply,
   onEdit,
   onDelete,
   children,
 }: {
-  onEdit: () => void;
-  onDelete: () => void;
+  onReact: (emoji: string) => void;
+  onReply?: () => void;
+  onEdit?: () => void;
+  onDelete?: () => void;
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
@@ -129,30 +152,105 @@ function MessageActions({
           role="menu"
           className="absolute right-0 top-full z-10 mt-1 min-w-[8rem] overflow-hidden rounded-xl border border-gray-200 bg-white py-1 shadow-lg"
         >
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => {
-              setOpen(false);
-              onEdit();
-            }}
-            className="block w-full px-4 py-2 text-left text-sm text-gray-700 transition-colors hover:bg-gray-100"
-          >
-            Edit
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => {
-              setOpen(false);
-              onDelete();
-            }}
-            className="block w-full px-4 py-2 text-left text-sm text-red-600 transition-colors hover:bg-gray-100"
-          >
-            Delete
-          </button>
+          <div className="flex gap-0.5 px-1.5 py-1">
+            {REACTION_EMOJIS.map((emoji) => (
+              <button
+                key={emoji}
+                type="button"
+                role="menuitem"
+                aria-label={`React ${emoji}`}
+                onClick={() => {
+                  setOpen(false);
+                  onReact(emoji);
+                }}
+                className="flex h-8 w-8 items-center justify-center rounded-full text-lg transition-colors hover:bg-gray-100"
+              >
+                {emoji}
+              </button>
+            ))}
+          </div>
+          {onReply && (
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setOpen(false);
+                onReply();
+              }}
+              className="block w-full px-4 py-2 text-left text-sm text-gray-700 transition-colors hover:bg-gray-100"
+            >
+              Reply
+            </button>
+          )}
+          {onEdit && (
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setOpen(false);
+                onEdit();
+              }}
+              className="block w-full px-4 py-2 text-left text-sm text-gray-700 transition-colors hover:bg-gray-100"
+            >
+              Edit
+            </button>
+          )}
+          {onDelete && (
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setOpen(false);
+                onDelete();
+              }}
+              className="block w-full px-4 py-2 text-left text-sm text-red-600 transition-colors hover:bg-gray-100"
+            >
+              Delete
+            </button>
+          )}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * The chips row shown directly under a bubble: one pill per emoji group (emoji +
+ * count), visually distinct when my id is among the reactors. Tapping a chip
+ * toggles my reaction. Renders nothing when the message has no reactions.
+ */
+function ReactionChips({
+  reactions,
+  meId,
+  onToggle,
+}: {
+  reactions: ReactionGroupDTO[];
+  meId: number;
+  onToggle: (emoji: string) => void;
+}) {
+  if (reactions.length === 0) return null;
+  return (
+    <div className="mt-1 flex flex-wrap gap-1">
+      {reactions.map((r) => {
+        const mine = r.userIds.includes(meId);
+        return (
+          <button
+            key={r.emoji}
+            type="button"
+            onClick={() => onToggle(r.emoji)}
+            aria-pressed={mine}
+            aria-label={`${r.emoji} ${r.userIds.length}${mine ? ', including you' : ''}`}
+            className={`flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs transition-colors ${
+              mine
+                ? 'border-[#0084ff] bg-[#0084ff]/10 text-[#0084ff]'
+                : 'border-gray-200 bg-gray-100 text-gray-600 hover:bg-gray-200'
+            }`}
+          >
+            <span aria-hidden="true">{r.emoji}</span>
+            <span aria-hidden="true">{r.userIds.length}</span>
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -296,20 +394,63 @@ function AttachmentFile({ file, isMine }: { file: AttachmentDTO; isMine: boolean
   );
 }
 
-/** The stacked content of a bubble: image block, file cards, then the text bubble
- *  (omitted for attachment-only messages, whose images render bare). */
+/**
+ * The quoted-reply block shown above a bubble's content when the message replies
+ * to another. Resolves the original sender's name from the chat members (falling
+ * back to 'Unknown' if they've since left), and previews the snapshot: a deleted
+ * original reads italic 'Message deleted'; an attachment-only original reads
+ * '📎 Attachment'; otherwise the (server-truncated) text. Tapping it asks the
+ * page to jump to the original (a no-op when that message isn't loaded).
+ */
+function ReplyQuote({
+  replyTo,
+  members,
+  isMine,
+  onJump,
+}: {
+  replyTo: ReplyToDTO;
+  members: UserDTO[];
+  isMine: boolean;
+  onJump: () => void;
+}) {
+  const name = members.find((m) => m.id === replyTo.senderId)?.displayName ?? 'Unknown';
+  let body: ReactNode;
+  if (replyTo.isDeleted) body = <span className="italic">Message deleted</span>;
+  else if (replyTo.content.length === 0 && replyTo.hasAttachments) body = '📎 Attachment';
+  else body = replyTo.content;
+
+  return (
+    <button
+      type="button"
+      onClick={onJump}
+      aria-label={`Replying to ${name}`}
+      className={`flex max-w-full flex-col overflow-hidden rounded-lg border-l-2 border-[#0084ff] bg-gray-100 px-2 py-1 text-left ${
+        isMine ? 'items-end self-end' : 'items-start self-start'
+      }`}
+    >
+      <span className="max-w-full truncate text-xs font-semibold text-[#0084ff]">{name}</span>
+      <span className="max-w-full truncate text-xs text-gray-600">{body}</span>
+    </button>
+  );
+}
+
+/** The stacked content of a bubble: an optional quoted-reply block, then the
+ *  image block, file cards, and the text bubble (the text bubble is omitted for
+ *  attachment-only messages, whose images render bare). */
 function MessageStack({
   message,
   members,
   meId,
   isMine,
   onOpenImage,
+  onJumpToMessage,
 }: {
   message: MessageDTO;
   members: UserDTO[];
   meId: number;
   isMine: boolean;
   onOpenImage: (a: AttachmentDTO) => void;
+  onJumpToMessage: (messageId: number) => void;
 }) {
   const images = message.attachments.filter((a) => a.kind === 'image');
   const files = message.attachments.filter((a) => a.kind === 'file');
@@ -318,6 +459,14 @@ function MessageStack({
 
   return (
     <div className={`flex w-full flex-col gap-1 ${isMine ? 'items-end' : 'items-start'}`}>
+      {message.replyTo && (
+        <ReplyQuote
+          replyTo={message.replyTo}
+          members={members}
+          isMine={isMine}
+          onJump={() => onJumpToMessage(message.replyTo!.id)}
+        />
+      )}
       {images.length > 0 && <AttachmentImages images={images} onOpen={onOpenImage} />}
       {files.map((f) => (
         <AttachmentFile key={f.id} file={f} isMine={isMine} />
@@ -361,6 +510,29 @@ function ReadReceipts({ members }: { members: ChatMemberDTO[] }) {
   );
 }
 
+/**
+ * Centered rule marking the boundary between already-read and unread
+ * messages, rendered immediately before the first unread other-sender
+ * message. Frozen once per chat open (see ChatPage) so it survives the
+ * automatic mark-read call that fires the instant the chat opens — a
+ * live-recomputed boundary would vanish before the user ever saw it. `id`
+ * lets the initial-scroll effect target it directly.
+ */
+function UnreadDivider() {
+  return (
+    <div
+      id="unread-divider"
+      role="separator"
+      aria-label="New messages"
+      className="my-2 flex items-center gap-2 px-3"
+    >
+      <div className="h-px flex-1 bg-red-400" />
+      <span className="text-xs font-semibold text-red-500">New messages</span>
+      <div className="h-px flex-1 bg-red-400" />
+    </div>
+  );
+}
+
 function MessageRow({
   row,
   members,
@@ -369,6 +541,9 @@ function MessageRow({
   onOpenImage,
   onEdit,
   onDelete,
+  onReact,
+  onReply,
+  onJumpToMessage,
 }: {
   row: Row;
   members: UserDTO[];
@@ -377,6 +552,9 @@ function MessageRow({
   onOpenImage: (a: AttachmentDTO) => void;
   onEdit: (message: MessageDTO) => void;
   onDelete: (message: MessageDTO) => void;
+  onReact: (message: MessageDTO, emoji: string) => void;
+  onReply: (message: MessageDTO) => void;
+  onJumpToMessage: (messageId: number) => void;
 }) {
   const { message, isMine, showSender, showAvatar, showTime, isRunStart } = row;
   const spacing = isRunStart ? 'mt-3' : 'mt-0.5';
@@ -390,9 +568,28 @@ function MessageRow({
           {message.isDeleted ? (
             <TombstoneBubble />
           ) : (
-            <MessageActions onEdit={() => onEdit(message)} onDelete={() => onDelete(message)}>
-              <MessageStack message={message} members={members} meId={meId} isMine onOpenImage={onOpenImage} />
+            <MessageActions
+              onReact={(emoji) => onReact(message, emoji)}
+              onReply={() => onReply(message)}
+              onEdit={() => onEdit(message)}
+              onDelete={() => onDelete(message)}
+            >
+              <MessageStack
+                message={message}
+                members={members}
+                meId={meId}
+                isMine
+                onOpenImage={onOpenImage}
+                onJumpToMessage={onJumpToMessage}
+              />
             </MessageActions>
+          )}
+          {!message.isDeleted && (
+            <ReactionChips
+              reactions={message.reactions}
+              meId={meId}
+              onToggle={(emoji) => onReact(message, emoji)}
+            />
           )}
           {showTime && <TimeLabel message={message} indent={false} />}
         </div>
@@ -425,12 +622,25 @@ function MessageRow({
           {message.isDeleted ? (
             <TombstoneBubble />
           ) : (
-            <MessageStack
-              message={message}
-              members={members}
+            <MessageActions
+              onReact={(emoji) => onReact(message, emoji)}
+              onReply={() => onReply(message)}
+            >
+              <MessageStack
+                message={message}
+                members={members}
+                meId={meId}
+                isMine={false}
+                onOpenImage={onOpenImage}
+                onJumpToMessage={onJumpToMessage}
+              />
+            </MessageActions>
+          )}
+          {!message.isDeleted && (
+            <ReactionChips
+              reactions={message.reactions}
               meId={meId}
-              isMine={false}
-              onOpenImage={onOpenImage}
+              onToggle={(emoji) => onReact(message, emoji)}
             />
           )}
           {showTime && <TimeLabel message={message} indent />}
@@ -483,7 +693,7 @@ export default function ChatPage() {
 
   const navigate = useNavigate();
   const { chat, removed } = useChat(chatId);
-  const { messages, loadOlder, hasMore, sendMessage, editMessage, deleteMessage, loading } =
+  const { messages, loadOlder, hasMore, sendMessage, editMessage, deleteMessage, toggleReaction, loading } =
     useMessages(chatId);
 
   // I'm no longer a member (left the group, maybe in another tab) — bail out.
@@ -498,12 +708,49 @@ export default function ChatPage() {
   const lastMarkedId = useRef<number>(-1);
   const [lightbox, setLightbox] = useState<AttachmentDTO | null>(null);
   const [editing, setEditing] = useState<MessageDTO | null>(null);
+  const [replyingTo, setReplyingTo] = useState<MessageDTO | null>(null);
+  // The message currently flashed by a reply "jump to original" tap.
+  const [highlightId, setHighlightId] = useState<number | null>(null);
   const [showInfo, setShowInfo] = useState(false);
+
+  // Unread divider: frozen once per chat (see the render-phase block below),
+  // and never recomputed afterwards, so the automatic mark-read call (which
+  // fires the instant the chat opens) can't make it vanish before it's seen.
+  const frozenChatIdRef = useRef<number | null>(null);
+  const [unreadBoundaryId, setUnreadBoundaryId] = useState<number | null>(null);
+
+  // Jump-to-bottom pill. `atBottom` is real state (unlike `stickToBottom`,
+  // which is a ref purely to avoid render-thrash on every scroll tick)
+  // because it drives the pill's visibility. `newMessageCount` counts other
+  // members' messages appended to the list while scrolled away from bottom.
+  const [atBottom, setAtBottom] = useState(true);
+  const [newMessageCount, setNewMessageCount] = useState(0);
+  const prevNewestIdRef = useRef<number | null>(null);
 
   const isGroup = chat?.type === 'group';
   const title = chat ? chatTitle(chat, meId) : 'Chat';
   const members = chat?.members ?? [];
   const rows = buildRows(messages, meId, isGroup);
+
+  // Freeze the unread boundary the moment this chat's first non-empty message
+  // list is available. Adjusted during render (not an Effect) — same "adjust
+  // state while rendering" idea as the resetRef pattern in useExpiringTyping
+  // (lib/chats.ts) — so it's already settled by the time the initial-scroll
+  // layout effect below runs. The `messages[0].chatId === chatId` guard skips
+  // the transitional render where `chat`/`messages` still hold the PREVIOUS
+  // chat's data (chatId flips a render before useChat/useMessages catch up),
+  // so switching chats never freezes on the wrong chat's data.
+  if (
+    frozenChatIdRef.current !== chatId &&
+    chat &&
+    messages.length > 0 &&
+    messages[0]!.chatId === chatId
+  ) {
+    frozenChatIdRef.current = chatId;
+    const myLastRead = chat.members.find((m) => m.id === meId)?.lastReadMessageId ?? 0;
+    const boundary = firstUnreadMessageId(messages, myLastRead, meId);
+    if (boundary !== unreadBoundaryId) setUnreadBoundaryId(boundary);
+  }
 
   // Presence + typing. The header dot is DM-only (the other member); the typing
   // indicator names live typers (mapped to member display names).
@@ -525,21 +772,56 @@ export default function ChatPage() {
   function onScroll() {
     const el = scrollRef.current;
     if (!el) return;
-    stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX;
+    stickToBottom.current = nearBottom;
+    // Only ever setState on an actual flip — scrolling fires constantly, and
+    // this is the one piece of scroll-position state that must re-render.
+    if (nearBottom !== atBottom) {
+      setAtBottom(nearBottom);
+      if (nearBottom) setNewMessageCount(0);
+    }
   }
 
-  // Auto-scroll: jump to bottom on first load; afterwards only follow new
-  // messages when the user is already near the bottom (don't yank them up).
+  // Auto-scroll: jump to the frozen unread divider (or the bottom, if there
+  // isn't one) on first load; afterwards only follow new messages when the
+  // user is already near the bottom (don't yank them up).
   useLayoutEffect(() => {
     if (messages.length === 0) return;
     if (!didInitialScroll.current) {
       didInitialScroll.current = true;
-      bottomRef.current?.scrollIntoView({ block: 'end' });
+      if (unreadBoundaryId !== null) {
+        document.getElementById('unread-divider')?.scrollIntoView({ block: 'center' });
+      } else {
+        bottomRef.current?.scrollIntoView({ block: 'end' });
+      }
       stickToBottom.current = true;
     } else if (stickToBottom.current) {
       bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
     }
-  }, [messages]);
+  }, [messages, unreadBoundaryId]);
+
+  // Reset the jump-to-bottom pill's per-chat counters when the chat changes.
+  // The unread-boundary freeze above self-heals via the chatId/messages
+  // guard, but the append counter has no equivalent natural reset.
+  useEffect(() => {
+    prevNewestIdRef.current = null;
+    setAtBottom(true);
+    setNewMessageCount(0);
+  }, [chatId]);
+
+  // Count other members' messages appended to the list while scrolled away
+  // from the bottom, for the jump-to-bottom pill's "N new" badge. A prepend
+  // (loadOlder) or an in-place edit/delete never raises the newest id, so
+  // only a genuine append is counted; my own messages never count.
+  useEffect(() => {
+    const newest = messages[messages.length - 1];
+    if (!newest) return;
+    const prevNewestId = prevNewestIdRef.current;
+    prevNewestIdRef.current = newest.id;
+    if (prevNewestId === null || newest.id <= prevNewestId || atBottom) return;
+    const appended = messages.filter((m) => m.id > prevNewestId && m.sender.id !== meId).length;
+    if (appended > 0) setNewMessageCount((c) => c + appended);
+  }, [messages, atBottom, meId]);
 
   // Mark read up to the newest message whenever the list changes. Best-effort
   // and fire-and-forget (nothing in the UI depends on the response) — a
@@ -564,16 +846,60 @@ export default function ChatPage() {
     });
   }
 
-  async function handleSend(content: string, mentions: number[], attachmentIds: number[]) {
+  /** Jump-to-bottom pill: smooth-scroll to the sentinel and hide the pill. */
+  function handleJumpToBottom() {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
     stickToBottom.current = true;
-    await sendMessage(content, mentions, attachmentIds);
+    setAtBottom(true);
+    setNewMessageCount(0);
+  }
+
+  async function handleSend(
+    content: string,
+    mentions: number[],
+    attachmentIds: number[],
+    replyToId?: number,
+  ) {
+    stickToBottom.current = true;
+    await sendMessage(content, mentions, attachmentIds, replyToId);
+    // Only clears once the send resolves — a failed send keeps the reply banner
+    // up (the composer restores the text) so the user can retry.
+    setReplyingTo(null);
   }
 
   function handleDelete(message: MessageDTO) {
     if (window.confirm('Delete this message?')) {
       if (editing?.id === message.id) setEditing(null);
+      if (replyingTo?.id === message.id) setReplyingTo(null);
       void deleteMessage(message.id);
     }
+  }
+
+  // Reply and edit modes are mutually exclusive — entering one clears the other.
+  function startReply(message: MessageDTO) {
+    setEditing(null);
+    setReplyingTo(message);
+  }
+
+  function startEdit(message: MessageDTO) {
+    setReplyingTo(null);
+    setEditing(message);
+  }
+
+  /** Scroll to and briefly flash the quoted original, if it's currently loaded. */
+  function jumpToMessage(messageId: number) {
+    const el = document.getElementById(`message-${messageId}`);
+    if (!el) return; // not in the loaded window — do nothing
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setHighlightId(messageId);
+    window.setTimeout(() => setHighlightId((cur) => (cur === messageId ? null : cur)), 1200);
+  }
+
+  function handleReact(message: MessageDTO, emoji: string) {
+    // Fire-and-forget: the returned DTO (and the socket echo) patch state in place.
+    void toggleReaction(message.id, emoji).catch(() => {
+      /* transient failure — the chips just stay as they were */
+    });
   }
 
   async function handleEditSubmit(messageId: number, content: string, mentions: number[]) {
@@ -615,50 +941,79 @@ export default function ChatPage() {
         )}
       </header>
 
-      <div ref={scrollRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto py-2">
-        {hasMore && (
-          <div className="flex justify-center py-2">
-            <button
-              type="button"
-              onClick={handleLoadOlder}
-              className="rounded-full bg-gray-100 px-4 py-1 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-200"
-            >
-              Load older
-            </button>
-          </div>
-        )}
-
-        {loading && messages.length === 0 ? (
-          <div className="flex justify-center py-10" role="status" aria-label="Loading messages">
-            <div className="h-8 w-8 animate-spin rounded-full border-4 border-gray-200 border-t-[#0084ff]" />
-          </div>
-        ) : messages.length === 0 ? (
-          <p className="py-10 text-center text-sm text-gray-400">No messages yet. Say hi!</p>
-        ) : (
-          rows.map((row) => (
-            <div key={row.message.id}>
-              {row.separatorLabel && (
-                <div className="flex justify-center py-3">
-                  <span className="rounded-full bg-gray-100 px-3 py-1 text-xs font-medium text-gray-500">
-                    {row.separatorLabel}
-                  </span>
-                </div>
-              )}
-              <MessageRow
-                row={row}
-                members={members}
-                meId={meId}
-                isGroup={isGroup}
-                onOpenImage={setLightbox}
-                onEdit={setEditing}
-                onDelete={handleDelete}
-              />
-              <ReadReceipts members={receiptsByMessageId.get(row.message.id) ?? []} />
+      <div className="relative min-h-0 flex-1">
+        <div
+          ref={scrollRef}
+          onScroll={onScroll}
+          data-testid="message-scroll"
+          className="h-full overflow-y-auto py-2"
+        >
+          {hasMore && (
+            <div className="flex justify-center py-2">
+              <button
+                type="button"
+                onClick={handleLoadOlder}
+                className="rounded-full bg-gray-100 px-4 py-1 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-200"
+              >
+                Load older
+              </button>
             </div>
-          ))
+          )}
+
+          {loading && messages.length === 0 ? (
+            <div className="flex justify-center py-10" role="status" aria-label="Loading messages">
+              <div className="h-8 w-8 animate-spin rounded-full border-4 border-gray-200 border-t-[#0084ff]" />
+            </div>
+          ) : messages.length === 0 ? (
+            <p className="py-10 text-center text-sm text-gray-400">No messages yet. Say hi!</p>
+          ) : (
+            rows.map((row) => (
+              <div
+                key={row.message.id}
+                id={`message-${row.message.id}`}
+                className={`rounded-lg transition-colors duration-500 ${
+                  highlightId === row.message.id ? 'bg-[#0084ff]/10' : ''
+                }`}
+              >
+                {row.separatorLabel && (
+                  <div className="flex justify-center py-3">
+                    <span className="rounded-full bg-gray-100 px-3 py-1 text-xs font-medium text-gray-500">
+                      {row.separatorLabel}
+                    </span>
+                  </div>
+                )}
+                {unreadBoundaryId === row.message.id && <UnreadDivider />}
+                <MessageRow
+                  row={row}
+                  members={members}
+                  meId={meId}
+                  isGroup={isGroup}
+                  onOpenImage={setLightbox}
+                  onEdit={startEdit}
+                  onDelete={handleDelete}
+                  onReact={handleReact}
+                  onReply={startReply}
+                  onJumpToMessage={jumpToMessage}
+                />
+                <ReadReceipts members={receiptsByMessageId.get(row.message.id) ?? []} />
+              </div>
+            ))
+          )}
+          <TypingIndicator names={typingNames} isGroup={isGroup} />
+          <div ref={bottomRef} />
+        </div>
+
+        {!atBottom && (
+          <button
+            type="button"
+            onClick={handleJumpToBottom}
+            aria-label="Jump to latest messages"
+            className="absolute bottom-3 right-3 flex items-center gap-1.5 rounded-full bg-white px-3 py-2 text-sm font-medium text-gray-700 shadow-lg ring-1 ring-gray-200 transition-colors hover:bg-gray-50"
+          >
+            <DownArrowIcon />
+            {newMessageCount > 0 && <span>{newMessageCount} new</span>}
+          </button>
         )}
-        <TypingIndicator names={typingNames} isGroup={isGroup} />
-        <div ref={bottomRef} />
       </div>
 
       <Composer
@@ -669,6 +1024,8 @@ export default function ChatPage() {
         editing={editing}
         onEditSubmit={handleEditSubmit}
         onCancelEdit={() => setEditing(null)}
+        replyingTo={replyingTo}
+        onCancelReply={() => setReplyingTo(null)}
       />
 
       {lightbox && <Lightbox attachment={lightbox} onClose={() => setLightbox(null)} />}

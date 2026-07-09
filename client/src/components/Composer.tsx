@@ -21,8 +21,16 @@ import {
 } from '../lib/mentions';
 
 interface ComposerProps {
-  /** Called with the trimmed message text, the ids the user @-mentioned, and any uploaded attachment ids. */
-  onSend: (content: string, mentions: number[], attachmentIds: number[]) => void | Promise<void>;
+  /**
+   * Called with the trimmed message text, the ids the user @-mentioned, any
+   * uploaded attachment ids, and — when replying — the target message's id.
+   */
+  onSend: (
+    content: string,
+    mentions: number[],
+    attachmentIds: number[],
+    replyToId?: number,
+  ) => void | Promise<void>;
   disabled?: boolean;
   /** All members of the chat; the autocomplete offers everyone except me. */
   members: UserDTO[];
@@ -35,6 +43,21 @@ interface ComposerProps {
   onEditSubmit?: (messageId: number, content: string, mentions: number[]) => void | Promise<void>;
   /** Leave edit mode without saving (✕ button / Escape). */
   onCancelEdit?: () => void;
+  /**
+   * When set, the composer is in reply mode: a quote banner sits above the input;
+   * the next send carries this message's id as its reply target. Mutually
+   * exclusive with `editing` (the parent clears one when entering the other).
+   */
+  replyingTo?: MessageDTO | null;
+  /** Leave reply mode without sending (✕ button / Escape). */
+  onCancelReply?: () => void;
+}
+
+/** One-line preview of the quoted message for the reply banner. */
+function replyPreview(m: MessageDTO): string {
+  if (m.content.length > 0) return m.content;
+  if (m.attachments.length > 0) return '📎 Attachment';
+  return '';
 }
 
 /** Open autocomplete state: where the `@` began, its end (caret), the matches, and the highlighted row. */
@@ -189,11 +212,14 @@ export default function Composer({
   editing = null,
   onEditSubmit,
   onCancelEdit,
+  replyingTo = null,
+  onCancelReply,
 }: ComposerProps) {
   const [text, setText] = useState('');
   const [mention, setMention] = useState<MentionState | null>(null);
   const [pending, setPending] = useState<PendingAttachment[]>([]);
   const [hd, setHd] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   // Members the user explicitly selected; reconciled against the final text on
@@ -207,6 +233,9 @@ export default function Composer({
 
   const isEditing = editing !== null;
   const editingId = editing?.id ?? null;
+  // Reply mode is mutually exclusive with edit mode (enforced by the parent).
+  const isReplying = !isEditing && replyingTo !== null;
+  const replyingToId = replyingTo?.id ?? null;
 
   const trimmed = text.trim();
   const uploading = pending.some((p) => p.status === 'uploading');
@@ -237,6 +266,14 @@ export default function Composer({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editingId]);
+
+  // Entering reply mode focuses the input (the text is left as-is so a half-typed
+  // message survives; the quote banner shows what's being replied to).
+  useEffect(() => {
+    if (replyingToId !== null) {
+      requestAnimationFrame(() => inputRef.current?.focus());
+    }
+  }, [replyingToId]);
 
   // Revoke any outstanding object URLs when the composer unmounts.
   useEffect(() => {
@@ -348,11 +385,19 @@ export default function Composer({
   }
 
   function handleKeyDown(e: KeyboardEvent<HTMLInputElement>) {
-    // Escape leaves edit mode when the mention dropdown isn't the thing to close.
-    if (e.key === 'Escape' && !mention && isEditing) {
-      e.preventDefault();
-      onCancelEdit?.();
-      return;
+    // Escape priority when the mention dropdown is closed: cancel reply first,
+    // then edit. (The dropdown, when open, is closed by the switch below.)
+    if (e.key === 'Escape' && !mention) {
+      if (isReplying) {
+        e.preventDefault();
+        onCancelReply?.();
+        return;
+      }
+      if (isEditing) {
+        e.preventDefault();
+        onCancelEdit?.();
+        return;
+      }
     }
     if (!mention) return; // dropdown closed → let the form handle Enter, etc.
     const { candidates, highlight } = mention;
@@ -382,19 +427,33 @@ export default function Composer({
     }
   }
 
+  /** Put failed-send state back, but never clobber anything typed/picked since. */
+  function restoreAfterFailure(prevText: string, prevPicked: MentionCandidate[], prevPending: PendingAttachment[]) {
+    setText((cur) => (cur.length > 0 ? cur : prevText));
+    if (picked.current.length === 0) picked.current = prevPicked;
+    setPending((cur) => (cur.length > 0 ? cur : prevPending));
+  }
+
   async function handleSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (!canSend) return;
     const content = trimmed;
+    setSendError(null);
 
     // Edit mode: save the text (attachments aren't editable). Mentions are
     // rescanned from the edited text; the server re-filters to chat members.
     if (isEditing && editing) {
       const mentions = mentionsFromText(content, mentionPool);
+      const prevText = text;
       setText('');
       setMention(null);
       picked.current = [];
-      await onEditSubmit?.(editing.id, content, mentions);
+      try {
+        await onEditSubmit?.(editing.id, content, mentions);
+      } catch (err) {
+        restoreAfterFailure(prevText, [], []);
+        setSendError(err instanceof Error ? err.message : 'Failed to save edit');
+      }
       return;
     }
 
@@ -403,16 +462,27 @@ export default function Composer({
       .filter((p) => p.status === 'done' && p.attachment)
       .map((p) => p.attachment!.id);
 
-    // Clear composer state and release preview URLs before firing the send.
+    // Clear composer state optimistically so the next message can be typed while
+    // the send is in flight. Preview URLs are NOT revoked yet — a failed send
+    // restores `pending`, so the previews must stay alive until success.
+    const prevText = text;
+    const prevPicked = picked.current;
+    const prevPending = pending;
     setText('');
     setMention(null);
     picked.current = [];
-    for (const p of pending) {
-      if (p.previewUrl) URL.revokeObjectURL(p.previewUrl);
-    }
     setPending([]);
 
-    await onSend(content, mentions, attachmentIds);
+    try {
+      await onSend(content, mentions, attachmentIds, replyingTo?.id);
+    } catch (err) {
+      restoreAfterFailure(prevText, prevPicked, prevPending);
+      setSendError(err instanceof Error ? err.message : 'Failed to send');
+      return;
+    }
+    for (const p of prevPending) {
+      if (p.previewUrl) URL.revokeObjectURL(p.previewUrl);
+    }
   }
 
   return (
@@ -428,6 +498,42 @@ export default function Composer({
             aria-label="Cancel edit"
             onClick={() => onCancelEdit?.()}
             className="flex h-6 w-6 items-center justify-center rounded-full text-gray-500 transition-colors hover:bg-gray-200"
+          >
+            <CloseIcon />
+          </button>
+        </div>
+      )}
+
+      {isReplying && replyingTo && (
+        <div className="flex items-center justify-between gap-2 rounded-lg bg-gray-100 px-3 py-1.5 text-sm">
+          <span className="flex min-w-0 flex-col">
+            <span className="font-medium text-gray-700">
+              Replying to {replyingTo.sender.displayName}
+            </span>
+            <span className="truncate text-gray-500">{replyPreview(replyingTo)}</span>
+          </span>
+          <button
+            type="button"
+            aria-label="Cancel reply"
+            onClick={() => onCancelReply?.()}
+            className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full text-gray-500 transition-colors hover:bg-gray-200"
+          >
+            <CloseIcon />
+          </button>
+        </div>
+      )}
+
+      {sendError && (
+        <div
+          role="alert"
+          className="flex items-center justify-between rounded-lg bg-red-50 px-3 py-1.5 text-sm text-red-700"
+        >
+          <span className="min-w-0 truncate">{sendError}</span>
+          <button
+            type="button"
+            aria-label="Dismiss error"
+            onClick={() => setSendError(null)}
+            className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full text-red-500 transition-colors hover:bg-red-100"
           >
             <CloseIcon />
           </button>

@@ -1,5 +1,7 @@
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
+import { useEffect } from 'react';
+import { BrowserRouter, Navigate, Route, Routes, useNavigate } from 'react-router-dom';
 import { AuthProvider } from './lib/auth';
+import { listenForSwNavigation } from './lib/pwa';
 import RequireAuth from './components/RequireAuth';
 import AppLayout from './components/AppLayout';
 import LoginPage from './pages/LoginPage';
@@ -11,9 +13,18 @@ import NewGroupPage from './pages/NewGroupPage';
 import SettingsPage from './pages/SettingsPage';
 import BotsPage from './pages/BotsPage';
 
+/** Routes notification-click messages from the service worker through the SPA
+ *  router (no reload). Must live inside BrowserRouter for useNavigate. */
+function SwNavigation() {
+  const navigate = useNavigate();
+  useEffect(() => listenForSwNavigation(navigate), [navigate]);
+  return null;
+}
+
 export default function App() {
   return (
     <BrowserRouter>
+      <SwNavigation />
       <AuthProvider>
         <Routes>
           <Route path="/login" element={<LoginPage />} />

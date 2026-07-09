@@ -82,17 +82,10 @@ self.addEventListener('notificationclick', (event) => {
     (async () => {
       const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
       for (const client of windows) {
-        // Reuse an already-open tab: focus it and route it to the conversation.
+        // Reuse an already-open tab: focus it and let the SPA route in-app
+        // (App listens for this message) — client.navigate() would full-reload.
         await client.focus();
-        if ('navigate' in client) {
-          try {
-            await client.navigate(url);
-          } catch {
-            client.postMessage({ type: 'navigate', url });
-          }
-        } else {
-          client.postMessage({ type: 'navigate', url });
-        }
+        client.postMessage({ type: 'navigate', url });
         return;
       }
       // No open tab: launch a fresh one.

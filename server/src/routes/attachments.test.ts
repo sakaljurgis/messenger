@@ -459,6 +459,8 @@ describe('buildPushPayload — attachment previews', () => {
       content: '',
       mentions: [],
       attachments: attachmentsList,
+      reactions: [],
+      replyTo: null,
       createdAt: '',
       editedAt: null,
       isDeleted: false,

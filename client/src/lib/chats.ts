@@ -91,7 +91,16 @@ export function replaceMessage(existing: MessageDTO[], updated: MessageDTO): Mes
 
 /** Neuter a message into its tombstone form (optimistic local delete). */
 export function tombstone(message: MessageDTO): MessageDTO {
-  return { ...message, content: '', mentions: [], attachments: [], editedAt: null, isDeleted: true };
+  return {
+    ...message,
+    content: '',
+    mentions: [],
+    attachments: [],
+    reactions: [],
+    replyTo: null,
+    editedAt: null,
+    isDeleted: true,
+  };
 }
 
 /** Recent-activity key for sort: last message time, or "now" for an empty (just-created) chat. */
@@ -164,6 +173,26 @@ export function readPositions(
     result.set(anchorId, list);
   }
   return result;
+}
+
+/**
+ * The id of the first message in `messages` (ascending) that's unread by me:
+ * sent by someone else — my own messages are implicitly read, mirroring the
+ * server's unread-count semantics — with an id past `myLastReadMessageId`.
+ * A `myLastReadMessageId` of 0 (never read anything, including a brand-new
+ * chat) means everything from others is unread, so the boundary lands on the
+ * very first other-sender message. Returns null when nothing qualifies (I'm
+ * fully caught up, or there are no other-sender messages at all).
+ */
+export function firstUnreadMessageId(
+  messages: MessageDTO[],
+  myLastReadMessageId: number,
+  meId: number,
+): number | null {
+  for (const m of messages) {
+    if (m.sender.id !== meId && m.id > myLastReadMessageId) return m.id;
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -388,9 +417,16 @@ export interface UseMessagesResult {
   messages: MessageDTO[];
   loadOlder: () => Promise<void>;
   hasMore: boolean;
-  sendMessage: (content: string, mentions?: number[], attachmentIds?: number[]) => Promise<MessageDTO>;
+  sendMessage: (
+    content: string,
+    mentions?: number[],
+    attachmentIds?: number[],
+    replyToId?: number,
+  ) => Promise<MessageDTO>;
   editMessage: (messageId: number, content: string, mentions?: number[]) => Promise<MessageDTO>;
   deleteMessage: (messageId: number) => Promise<void>;
+  /** Toggle my emoji reaction on a message; updates local state in place. */
+  toggleReaction: (messageId: number, emoji: string) => Promise<MessageDTO>;
   loading: boolean;
   error: string | null;
 }
@@ -471,10 +507,16 @@ export function useMessages(chatId: number): UseMessagesResult {
   }, [chatId, olderCursor]);
 
   const sendMessage = useCallback(
-    async (content: string, mentions?: number[], attachmentIds?: number[]): Promise<MessageDTO> => {
+    async (
+      content: string,
+      mentions?: number[],
+      attachmentIds?: number[],
+      replyToId?: number,
+    ): Promise<MessageDTO> => {
       const body: SendMessageRequest = { content };
       if (mentions && mentions.length > 0) body.mentions = mentions;
       if (attachmentIds && attachmentIds.length > 0) body.attachmentIds = attachmentIds;
+      if (replyToId) body.replyToId = replyToId;
       const res = await apiPost<{ message: MessageDTO }>(`/api/chats/${chatId}/messages`, body);
       setMessages((prev) => mergeMessages(prev, [res.message]));
       return res.message;
@@ -507,6 +549,15 @@ export function useMessages(chatId: number): UseMessagesResult {
     [chatId],
   );
 
+  const toggleReactionCb = useCallback(
+    async (messageId: number, emoji: string): Promise<MessageDTO> => {
+      const message = await toggleReaction(chatId, messageId, emoji);
+      setMessages((prev) => replaceMessage(prev, message));
+      return message;
+    },
+    [chatId],
+  );
+
   return {
     messages,
     loadOlder,
@@ -514,6 +565,7 @@ export function useMessages(chatId: number): UseMessagesResult {
     sendMessage,
     editMessage,
     deleteMessage,
+    toggleReaction: toggleReactionCb,
     loading,
     error,
   };
@@ -522,6 +574,23 @@ export function useMessages(chatId: number): UseMessagesResult {
 /** Mark the chat read up to and including `messageId` (fire-and-forget). */
 export function markRead(chatId: number, messageId: number): Promise<void> {
   return apiPost<void>(`/api/chats/${chatId}/read`, { messageId });
+}
+
+/**
+ * Toggle my `emoji` reaction on a message (adds it, or removes it if I already
+ * reacted with it). Resolves to the server's updated message DTO. `useMessages`
+ * wraps this to also patch the message into local state; the socket
+ * `message:updated` echo reconciles the same DTO for other open tabs.
+ */
+export function toggleReaction(
+  chatId: number,
+  messageId: number,
+  emoji: string,
+): Promise<MessageDTO> {
+  return apiPost<{ message: MessageDTO }>(
+    `/api/chats/${chatId}/messages/${messageId}/reactions`,
+    { emoji },
+  ).then((res) => res.message);
 }
 
 // ---------------------------------------------------------------------------

@@ -131,6 +131,8 @@ describe('buildPushPayload', () => {
     content: 'hi',
     mentions: [],
     attachments: [],
+    reactions: [],
+    replyTo: null,
     createdAt: '',
     editedAt: null,
     isDeleted: false,

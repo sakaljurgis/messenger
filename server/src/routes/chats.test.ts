@@ -491,6 +491,21 @@ describe('PATCH /api/chats/:id/members', () => {
       .send({ memberIds: [999999] });
     expect(res.status).toBe(404);
   });
+
+  it('lets a newly added member read the full pre-join history', async () => {
+    const group = (
+      await alice.agent.post('/api/chats').send({ name: 'G', memberIds: [bob.user.id] })
+    ).body.chat.id as number;
+    await send(alice, group, 'before carol 1');
+    await send(bob, group, 'before carol 2');
+
+    await alice.agent.patch(`/api/chats/${group}/members`).send({ memberIds: [carol.user.id] });
+
+    const res = await carol.agent.get(`/api/chats/${group}/messages`);
+    expect(res.status).toBe(200);
+    const page = res.body as MessagesPage;
+    expect(page.messages.map((m) => m.content)).toEqual(['before carol 1', 'before carol 2']);
+  });
 });
 
 describe('PATCH /api/chats/:id — rename', () => {

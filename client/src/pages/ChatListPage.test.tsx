@@ -71,7 +71,7 @@ const bob: ChatMemberDTO = { id: 2, email: 'bob@example.com', displayName: 'Bob'
 const carol: ChatMemberDTO = { id: 3, email: 'carol@example.com', displayName: 'Carol', isBot: false, lastReadMessageId: 0 };
 
 function msg(id: number, sender: UserDTO, content: string): MessageDTO {
-  return { id, chatId: 1, sender, content, mentions: [], attachments: [], createdAt: new Date().toISOString(), editedAt: null, isDeleted: false };
+  return { id, chatId: 1, sender, content, mentions: [], attachments: [], reactions: [], replyTo: null, createdAt: new Date().toISOString(), editedAt: null, isDeleted: false };
 }
 
 const chats: ChatSummaryDTO[] = [

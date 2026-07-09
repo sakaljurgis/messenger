@@ -4,6 +4,8 @@ import {
   primaryKey,
   sqliteTable,
   text,
+  uniqueIndex,
+  type AnySQLiteColumn,
 } from 'drizzle-orm/sqlite-core';
 
 export const users = sqliteTable('users', {
@@ -86,6 +88,15 @@ export const messages = sqliteTable(
       .notNull()
       .references(() => users.id),
     content: text('content').notNull(),
+    /**
+     * The message this one replies to; null for a normal message. Self-FK within
+     * `messages`. Deletes are soft (tombstones), so the target normally persists;
+     * but a chat delete (last member leaves) hard-deletes its messages, so this is
+     * SET NULL to avoid a dangling reference during that cascade.
+     */
+    replyToId: integer('reply_to_id').references((): AnySQLiteColumn => messages.id, {
+      onDelete: 'set null',
+    }),
     createdAt: integer('created_at', { mode: 'timestamp' })
       .notNull()
       .$defaultFn(() => new Date()),
@@ -110,6 +121,28 @@ export const messageMentions = sqliteTable(
   (t) => [
     primaryKey({ columns: [t.messageId, t.userId] }),
     index('message_mentions_user_idx').on(t.userId),
+  ],
+);
+
+export const messageReactions = sqliteTable(
+  'message_reactions',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    messageId: integer('message_id')
+      .notNull()
+      .references(() => messages.id, { onDelete: 'cascade' }),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    emoji: text('emoji').notNull(),
+    createdAt: integer('created_at', { mode: 'timestamp' })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => [
+    // One reaction per (message, user, emoji) — the toggle relies on this.
+    uniqueIndex('message_reactions_unique').on(t.messageId, t.userId, t.emoji),
+    index('message_reactions_message_idx').on(t.messageId),
   ],
 );
 
@@ -164,3 +197,4 @@ export type UserRow = typeof users.$inferSelect;
 export type ChatRow = typeof chats.$inferSelect;
 export type MessageRow = typeof messages.$inferSelect;
 export type AttachmentRow = typeof attachments.$inferSelect;
+export type MessageReactionRow = typeof messageReactions.$inferSelect;

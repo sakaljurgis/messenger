@@ -1,3 +1,4 @@
+import { REACTION_EMOJIS } from '@messenger/shared';
 import { and, eq, inArray, lt } from 'drizzle-orm';
 import { Router } from 'express';
 import { z } from 'zod';
@@ -13,6 +14,7 @@ import {
   getMemberIds,
   listChatSummaries,
   listMessages,
+  toggleReaction,
 } from '../chats/service.js';
 import type { Db } from '../db/index.js';
 import { attachments, chatMembers, chats, users, type ChatRow } from '../db/schema.js';
@@ -31,6 +33,8 @@ const sendSchema = z
     content: z.string().trim().max(4000).optional().default(''),
     mentions: z.array(z.number().int().positive()).optional(),
     attachmentIds: z.array(z.number().int().positive()).optional(),
+    // Reply target; existence/same-chat/live checks happen in createMessage.
+    replyToId: z.number().int().positive().optional(),
   })
   .refine((d) => d.content.length > 0 || (d.attachmentIds?.length ?? 0) > 0, {
     message: 'Message content or attachments required',
@@ -46,6 +50,8 @@ const editSchema = z.object({
   content: z.string().trim().min(1).max(4000),
   mentions: z.array(z.number().int().positive()).optional(),
 });
+// The emoji whitelist is enforced against REACTION_EMOJIS in the handler.
+const reactionSchema = z.object({ emoji: z.string() });
 
 /** First zod issue message, for the `{ error }` body. */
 function firstIssue(error: z.ZodError): string {
@@ -228,10 +234,15 @@ export function chatsRouter(db: Db, events: ChatEvents, storage: Storage): Route
       content: parsed.data.content,
       mentions: parsed.data.mentions,
       attachmentIds: parsed.data.attachmentIds,
+      replyToId: parsed.data.replyToId,
     });
     if (!result.ok) {
       if (result.reason === 'invalid-attachments') {
         res.status(400).json({ error: 'Invalid attachments' });
+        return;
+      }
+      if (result.reason === 'invalid-reply') {
+        res.status(400).json({ error: 'Invalid reply target' });
         return;
       }
       res.status(404).json(CHAT_NOT_FOUND);
@@ -315,6 +326,52 @@ export function chatsRouter(db: Db, events: ChatEvents, storage: Storage): Route
       }
     }
     res.status(204).end();
+  });
+
+  // POST /api/chats/:id/messages/:messageId/reactions — toggle my emoji reaction
+  // on a message (any member may react; the message must be in this chat and live).
+  router.post('/:id/messages/:messageId/reactions', requireAuth, (req, res) => {
+    const me = req.user!;
+    const chatId = parseId(req.params.id);
+    const messageId = parseId(req.params.messageId);
+    if (chatId === null) {
+      res.status(404).json(CHAT_NOT_FOUND);
+      return;
+    }
+    if (messageId === null) {
+      res.status(404).json(MESSAGE_NOT_FOUND);
+      return;
+    }
+    const parsed = reactionSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: firstIssue(parsed.error) });
+      return;
+    }
+    if (!(REACTION_EMOJIS as readonly string[]).includes(parsed.data.emoji)) {
+      res.status(400).json({ error: 'Invalid reaction' });
+      return;
+    }
+
+    const result = toggleReaction(db, events, {
+      chatId,
+      messageId,
+      userId: me.id,
+      emoji: parsed.data.emoji,
+    });
+    if (!result.ok) {
+      switch (result.reason) {
+        case 'not-member':
+          res.status(404).json(CHAT_NOT_FOUND);
+          return;
+        case 'not-found':
+          res.status(404).json(MESSAGE_NOT_FOUND);
+          return;
+        case 'deleted':
+          res.status(400).json({ error: 'Message deleted' });
+          return;
+      }
+    }
+    res.status(200).json({ message: result.message });
   });
 
   // POST /api/chats/:id/read — advance my read marker (never rewinds).
