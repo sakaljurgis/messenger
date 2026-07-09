@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { BotDTO, UserDTO } from '@messenger/shared';
-import { apiGet, apiPatch, apiPost } from '../lib/api';
+import { apiDelete, apiGet, apiPatch, apiPost } from '../lib/api';
 import Avatar from '../components/Avatar';
 
 /**
@@ -99,6 +99,20 @@ function BotRow({ bot, onSaved }: { bot: BotDTO; onSaved: () => void }) {
     }
   }
 
+  async function remove() {
+    if (busy) return;
+    if (!window.confirm(`Delete ${bot.displayName}? It will be removed from all chats.`)) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await apiDelete<void>(`/api/bots/${bot.id}`);
+      onSaved();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not delete bot');
+      setBusy(false);
+    }
+  }
+
   return (
     <li className="rounded-xl bg-gray-50 p-3">
       <div className="mb-2 flex items-center gap-3">
@@ -107,6 +121,15 @@ function BotRow({ bot, onSaved }: { bot: BotDTO; onSaved: () => void }) {
           <p className="truncate font-medium text-gray-900">{bot.displayName}</p>
           <p className="truncate text-xs text-gray-500">{bot.webhookUrl ?? 'No webhook'}</p>
         </div>
+        <button
+          type="button"
+          onClick={remove}
+          disabled={busy}
+          aria-label={`Delete ${bot.displayName}`}
+          className="ml-auto flex-shrink-0 rounded-full px-3 py-1.5 text-sm font-semibold text-red-600 transition-colors hover:bg-red-50 disabled:opacity-50"
+        >
+          Delete
+        </button>
       </div>
 
       <label className="sr-only" htmlFor={`webhook-${bot.id}`}>

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import type { BotDTO, UserDTO } from '@messenger/shared';
@@ -50,6 +50,10 @@ function makeFetch(initialBots: BotDTO[]) {
       const body = JSON.parse(init!.body as string) as { webhookUrl: string | null };
       bots = bots.map((b) => (b.id === id ? { ...b, webhookUrl: body.webhookUrl } : b));
       return jsonResponse(200, { bot: bots.find((b) => b.id === id)! });
+    }
+    if (patch && method === 'DELETE') {
+      bots = bots.filter((b) => b.id !== Number(patch[1]));
+      return jsonResponse(204, {});
     }
     throw new Error(`Unexpected fetch: ${method} ${url}`);
   });
@@ -135,5 +139,44 @@ describe('BotsPage', () => {
 
     // The new bot joins the list after the reload.
     expect(await screen.findByText('New Bot')).toBeInTheDocument();
+  });
+
+  it('deletes a bot after confirmation and drops it from the list', async () => {
+    const fetchMock = makeFetch(bots);
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    try {
+      renderBots(fetchMock);
+      await screen.findByText('Echo Bot');
+
+      await userEvent.click(screen.getByRole('button', { name: 'Delete Echo Bot' }));
+
+      const deleteCall = fetchMock.mock.calls.find(
+        ([i, init]) => i.toString().endsWith('/api/bots/2') && init?.method === 'DELETE',
+      );
+      expect(deleteCall).toBeDefined();
+
+      // Reloaded list no longer contains the bot; the other one stays.
+      await waitFor(() => expect(screen.queryByText('Echo Bot')).not.toBeInTheDocument());
+      expect(screen.getByText('Silent Bot')).toBeInTheDocument();
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+
+  it('does not delete when the confirmation is dismissed', async () => {
+    const fetchMock = makeFetch(bots);
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    try {
+      renderBots(fetchMock);
+      await screen.findByText('Echo Bot');
+
+      await userEvent.click(screen.getByRole('button', { name: 'Delete Echo Bot' }));
+
+      const deleteCall = fetchMock.mock.calls.find(([, init]) => init?.method === 'DELETE');
+      expect(deleteCall).toBeUndefined();
+      expect(screen.getByText('Echo Bot')).toBeInTheDocument();
+    } finally {
+      confirmSpy.mockRestore();
+    }
   });
 });

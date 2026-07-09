@@ -16,6 +16,12 @@ export const users = sqliteTable('users', {
   webhookUrl: text('webhook_url'),
   /** Bots only: bearer token the bot uses to call the inbound bot API. */
   apiToken: text('api_token').unique(),
+  /**
+   * Soft-delete marker (set when a bot is deleted). The row is kept so the
+   * bot's old messages still resolve a sender; deleted users are excluded from
+   * the directory and the bots list, and hold no memberships or credentials.
+   */
+  deletedAt: integer('deleted_at', { mode: 'timestamp' }),
   createdAt: integer('created_at', { mode: 'timestamp' })
     .notNull()
     .$defaultFn(() => new Date()),

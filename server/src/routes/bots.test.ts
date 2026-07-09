@@ -3,7 +3,12 @@ import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../app.js';
 import { createDb, type Db } from '../db/index.js';
-import { createChatEvents, type ChatEvents, type MessageNewEvent } from '../events.js';
+import {
+  createChatEvents,
+  type ChatEvents,
+  type ChatUpdatedEvent,
+  type MessageNewEvent,
+} from '../events.js';
 import { initWebhooks } from '../webhooks.js';
 
 type App = ReturnType<typeof createApp>;
@@ -407,5 +412,101 @@ describe('webhook fan-out', () => {
     expect(fetchFn).toHaveBeenCalledTimes(2);
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
+  });
+});
+
+describe('DELETE /api/bots/:id', () => {
+  let db: Db;
+  let app: App;
+  let events: ChatEvents;
+  let alice: Actor;
+
+  beforeEach(async () => {
+    db = createDb(':memory:');
+    events = createChatEvents();
+    app = createApp(db, events);
+    alice = await register(app, 'alice@example.com', 'Alice');
+  });
+
+  it('requires authentication', async () => {
+    const { bot } = await createBot(alice, 'Echo Bot');
+    const res = await request(app).delete(`/api/bots/${bot.id}`);
+    expect(res.status).toBe(401);
+  });
+
+  it('soft-deletes: gone from the bots list and the user directory, PATCH 404s', async () => {
+    const { bot } = await createBot(alice, 'Echo Bot');
+
+    const res = await alice.agent.delete(`/api/bots/${bot.id}`);
+    expect(res.status).toBe(204);
+
+    const list = (await alice.agent.get('/api/bots')).body.bots as BotDTO[];
+    expect(list.find((b) => b.id === bot.id)).toBeUndefined();
+
+    const directory = (await alice.agent.get('/api/users')).body.users as UserDTO[];
+    expect(directory.find((u) => u.id === bot.id)).toBeUndefined();
+
+    const patch = await alice.agent
+      .patch(`/api/bots/${bot.id}`)
+      .send({ webhookUrl: null });
+    expect(patch.status).toBe(404);
+
+    // A repeat delete finds nothing (already gone).
+    expect((await alice.agent.delete(`/api/bots/${bot.id}`)).status).toBe(404);
+  });
+
+  it('revokes the apiToken: the bot API stops accepting it', async () => {
+    const { bot, apiToken } = await createBot(alice, 'Echo Bot');
+    const groupId = (
+      await alice.agent.post('/api/chats').send({ name: 'G', memberIds: [bot.id] })
+    ).body.chat.id as number;
+
+    await alice.agent.delete(`/api/bots/${bot.id}`);
+
+    const res = await request(app)
+      .post('/api/bot/messages')
+      .set('Authorization', `Bearer ${apiToken}`)
+      .send({ chatId: groupId, content: 'still alive?' });
+    expect(res.status).toBe(401);
+  });
+
+  it('removes the bot from chats (chat:updated) but keeps its old messages readable', async () => {
+    const { bot, apiToken } = await createBot(alice, 'Echo Bot');
+    const groupId = (
+      await alice.agent.post('/api/chats').send({ name: 'G', memberIds: [bot.id] })
+    ).body.chat.id as number;
+
+    // The bot posts a message while it is still alive.
+    const sent = await request(app)
+      .post('/api/bot/messages')
+      .set('Authorization', `Bearer ${apiToken}`)
+      .send({ chatId: groupId, content: 'beep boop' });
+    expect(sent.status).toBe(201);
+
+    const updates: ChatUpdatedEvent[] = [];
+    events.on('chat:updated', (e) => updates.push(e));
+
+    await alice.agent.delete(`/api/bots/${bot.id}`);
+
+    // Members were notified like a leave...
+    expect(updates).toHaveLength(1);
+    expect(updates[0]!.removedMemberIds).toEqual([bot.id]);
+    expect(updates[0]!.memberIds).toEqual([alice.user.id]);
+
+    // ...the roster no longer lists the bot...
+    const chat = (await alice.agent.get(`/api/chats/${groupId}`)).body.chat;
+    expect(chat.members.map((m: UserDTO) => m.id)).toEqual([alice.user.id]);
+
+    // ...but its message history survives with a resolvable sender.
+    const page = await alice.agent.get(`/api/chats/${groupId}/messages`);
+    const messages = page.body.messages as Array<{ content: string; sender: UserDTO }>;
+    expect(messages.map((m) => m.content)).toContain('beep boop');
+    expect(messages.find((m) => m.content === 'beep boop')!.sender.displayName).toBe('Echo Bot');
+  });
+
+  it('404s for a human user id (no existence leak)', async () => {
+    const bob = await register(app, 'bob@example.com', 'Bob');
+    const res = await alice.agent.delete(`/api/bots/${bob.user.id}`);
+    expect(res.status).toBe(404);
   });
 });

@@ -44,7 +44,7 @@ export function createApp(
   app.use('/api/users', usersRouter(db));
   app.use('/api/chats', chatsRouter(db, events, storage));
   app.use('/api/push', pushRouter(db));
-  app.use('/api/bots', botsRouter(db));
+  app.use('/api/bots', botsRouter(db, events));
   app.use('/api/bot', botApiRouter(db, events));
   // Attachments: upload (POST /api/chats/:chatId/attachments) + serve
   // (GET /api/attachments/:id). Mounted at /api so it owns both path shapes;

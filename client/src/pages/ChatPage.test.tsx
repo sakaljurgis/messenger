@@ -572,6 +572,33 @@ describe('ChatPage', () => {
     }
   });
 
+  it('group info: renaming PATCHes the trimmed name and closes the form', async () => {
+    const group: ChatSummaryDTO = {
+      id: 10, type: 'group', name: 'Team', members: [me, bob], lastMessage: null, unreadCount: 0,
+    };
+    const fetchMock = stubFetch({ messages: [msg(1, bob, 'hi team')], chat: group, users: [bob] });
+    renderChatPage();
+    await screen.findByText('hi team');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Group info' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Rename group' }));
+
+    const input = screen.getByLabelText('Group name');
+    await userEvent.clear(input);
+    await userEvent.type(input, '  Renamed Team  ');
+    await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      const patch = fetchMock.mock.calls.find(
+        ([i, init]) => i.toString().endsWith('/api/chats/10') && init?.method === 'PATCH',
+      );
+      expect(patch).toBeDefined();
+      expect(JSON.parse(patch?.[1]?.body as string)).toEqual({ name: 'Renamed Team' });
+    });
+    // The form closes after a successful save (the live name arrives via chat:updated).
+    await waitFor(() => expect(screen.queryByLabelText('Group name')).not.toBeInTheDocument());
+  });
+
   it('navigates away when the server signals chat:removed (left in another tab)', async () => {
     stubFetch({ messages: [msg(1, bob, 'Hi from Bob')] });
     renderChatPage();

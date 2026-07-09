@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import type { ChatSummaryDTO, UserDTO } from '@messenger/shared';
 import { apiGet, apiPatch, apiPost } from '../lib/api';
@@ -42,6 +42,14 @@ export default function GroupInfo({
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState(false);
+  const [nameDraft, setNameDraft] = useState(chat.name ?? '');
+
+  // Keep the draft in sync with the live name (e.g. renamed in another tab)
+  // while the form is closed; an open edit is never clobbered.
+  useEffect(() => {
+    if (!renaming) setNameDraft(chat.name ?? '');
+  }, [chat.name, renaming]);
 
   useEffect(() => {
     let cancelled = false;
@@ -83,6 +91,23 @@ export default function GroupInfo({
     }
   }
 
+  async function rename(e: FormEvent) {
+    e.preventDefault();
+    const trimmed = nameDraft.trim();
+    if (trimmed.length === 0 || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await apiPatch(`/api/chats/${chat.id}`, { name: trimmed });
+      // The new name lands via the chat:updated socket event.
+      setRenaming(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not rename group');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function leave() {
     if (busy || !window.confirm('Leave this group?')) return;
     setBusy(true);
@@ -114,10 +139,52 @@ export default function GroupInfo({
         <div className="min-h-0 flex-1 overflow-y-auto p-3">
           <div className="mb-4 flex items-center gap-3">
             <Avatar name={chat.name ?? 'Group'} id={chat.id} size="lg" />
-            <div className="min-w-0">
-              <h2 className="truncate text-lg font-bold text-gray-900">{chat.name ?? 'Group'}</h2>
-              <p className="text-sm text-gray-500">{chat.members.length} members</p>
-            </div>
+            {renaming ? (
+              <form onSubmit={rename} className="flex min-w-0 flex-1 items-center gap-2">
+                <label htmlFor="group-rename" className="sr-only">
+                  Group name
+                </label>
+                <input
+                  id="group-rename"
+                  type="text"
+                  value={nameDraft}
+                  onChange={(e) => setNameDraft(e.target.value)}
+                  autoFocus
+                  className="w-full min-w-0 rounded-full border border-gray-300 px-3 py-1.5 text-gray-900 focus:border-[#0084ff] focus:outline-none"
+                />
+                <button
+                  type="submit"
+                  disabled={nameDraft.trim().length === 0 || busy}
+                  className="flex-shrink-0 rounded-full bg-[#0084ff] px-3 py-1.5 text-sm font-semibold text-white transition-opacity disabled:opacity-40"
+                >
+                  Save
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRenaming(false)}
+                  className="flex-shrink-0 rounded-full px-2 py-1.5 text-sm font-semibold text-gray-600"
+                >
+                  Cancel
+                </button>
+              </form>
+            ) : (
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <h2 className="truncate text-lg font-bold text-gray-900">
+                    {chat.name ?? 'Group'}
+                  </h2>
+                  <button
+                    type="button"
+                    onClick={() => setRenaming(true)}
+                    aria-label="Rename group"
+                    className="flex-shrink-0 rounded-full px-2 py-0.5 text-sm font-semibold text-[#0084ff] transition-colors hover:bg-gray-100"
+                  >
+                    Rename
+                  </button>
+                </div>
+                <p className="text-sm text-gray-500">{chat.members.length} members</p>
+              </div>
+            )}
           </div>
 
           {error && <p className="pb-2 text-sm text-red-600">{error}</p>}

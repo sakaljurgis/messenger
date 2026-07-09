@@ -99,6 +99,12 @@ export interface AddMembersRequest {
   memberIds: number[];
 }
 
+/** PATCH /api/chats/:id — rename a group. */
+export interface RenameChatRequest {
+  /** Trimmed 1–100 chars (same rule as at creation). */
+  name: string;
+}
+
 export interface MarkReadRequest {
   /** Mark read up to and including this message id. */
   messageId: number;

@@ -38,6 +38,8 @@ const sendSchema = z
 const addMembersSchema = z.object({
   memberIds: z.array(z.number().int().positive()),
 });
+// Same rule as a group's name at creation (groupSchema).
+const renameSchema = z.object({ name: z.string().trim().min(1).max(100) });
 const markReadSchema = z.object({ messageId: z.number().int() });
 // Edits can't be attachment-only-empty: content is required, 1–4000 chars trimmed.
 const editSchema = z.object({
@@ -352,6 +354,39 @@ export function chatsRouter(db: Db, events: ChatEvents, storage: Storage): Route
       });
     }
     res.status(204).end();
+  });
+
+  // PATCH /api/chats/:id — rename a group (any member may).
+  router.patch('/:id', requireAuth, (req, res) => {
+    const me = req.user!;
+    const chatId = parseId(req.params.id);
+    const chat = chatId === null ? undefined : getChatForMember(db, chatId, me.id);
+    if (!chat) {
+      res.status(404).json(CHAT_NOT_FOUND);
+      return;
+    }
+    if (chat.type === 'dm') {
+      res.status(400).json({ error: 'Cannot rename a DM' });
+      return;
+    }
+    const parsed = renameSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: firstIssue(parsed.error) });
+      return;
+    }
+
+    const updated = db
+      .update(chats)
+      .set({ name: parsed.data.name })
+      .where(eq(chats.id, chat.id))
+      .returning()
+      .get();
+    events.emit('chat:updated', {
+      chat: updated,
+      memberIds: getMemberIds(db, chat.id),
+      addedMemberIds: [],
+    });
+    res.status(200).json({ chat: getChatSummaryForUser(db, chat.id, me.id)! });
   });
 
   // PATCH /api/chats/:id/members — add members to a group.

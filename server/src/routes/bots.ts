@@ -1,12 +1,14 @@
 import { randomBytes } from 'node:crypto';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { Router } from 'express';
 import { z } from 'zod';
 import type { BotDTO } from '@messenger/shared';
 import { requireAuth } from '../auth/session.js';
+import { getMemberIds } from '../chats/service.js';
 import type { Db } from '../db/index.js';
-import { users, type UserRow } from '../db/schema.js';
+import { chatMembers, chats, users, type UserRow } from '../db/schema.js';
 import { toUserDTO } from '../dto.js';
+import type { ChatEvents } from '../events.js';
 
 /**
  * Bot registration (POST /api/bots). Any authenticated human can create a bot —
@@ -58,7 +60,7 @@ function botEmail(): string {
   return `bot-${randomBytes(8).toString('hex')}@bots.local`;
 }
 
-export function botsRouter(db: Db): Router {
+export function botsRouter(db: Db, events: ChatEvents): Router {
   const router = Router();
 
   // POST /api/bots — create a bot. The apiToken is generated here and returned
@@ -92,7 +94,11 @@ export function botsRouter(db: Db): Router {
   // human may manage bots (bots are a shared resource in this personal app).
   // Returns BotDTOs (incl. webhookUrl for the edit form) but never the apiToken.
   router.get('/', requireAuth, (_req, res) => {
-    const bots = db.select().from(users).where(eq(users.isBot, true)).all();
+    const bots = db
+      .select()
+      .from(users)
+      .where(and(eq(users.isBot, true), isNull(users.deletedAt)))
+      .all();
     res.json({ bots: bots.map(toBotDTO) });
   });
 
@@ -118,7 +124,7 @@ export function botsRouter(db: Db): Router {
     const updated = db
       .update(users)
       .set({ webhookUrl })
-      .where(and(eq(users.id, id), eq(users.isBot, true)))
+      .where(and(eq(users.id, id), eq(users.isBot, true), isNull(users.deletedAt)))
       .returning()
       .get();
     if (!updated) {
@@ -127,6 +133,45 @@ export function botsRouter(db: Db): Router {
     }
 
     res.json({ bot: toBotDTO(updated) });
+  });
+
+  // DELETE /api/bots/:id — retire a bot. The row is soft-deleted (its old
+  // messages keep a resolvable sender) with credentials revoked, and it is
+  // pulled out of every chat — members are notified exactly like a leave, so
+  // open member lists update live. A repeat delete 404s (already gone).
+  router.delete('/:id', requireAuth, (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      res.status(404).json({ error: 'Bot not found' });
+      return;
+    }
+    const bot = db
+      .update(users)
+      .set({ deletedAt: new Date(), apiToken: null, webhookUrl: null })
+      .where(and(eq(users.id, id), eq(users.isBot, true), isNull(users.deletedAt)))
+      .returning()
+      .get();
+    if (!bot) {
+      res.status(404).json({ error: 'Bot not found' });
+      return;
+    }
+
+    const memberships = db
+      .select({ chat: chats })
+      .from(chatMembers)
+      .innerJoin(chats, eq(chats.id, chatMembers.chatId))
+      .where(eq(chatMembers.userId, bot.id))
+      .all();
+    db.delete(chatMembers).where(eq(chatMembers.userId, bot.id)).run();
+    for (const { chat } of memberships) {
+      events.emit('chat:updated', {
+        chat,
+        memberIds: getMemberIds(db, chat.id),
+        addedMemberIds: [],
+        removedMemberIds: [bot.id],
+      });
+    }
+    res.status(204).end();
   });
 
   return router;

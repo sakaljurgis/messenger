@@ -1,4 +1,4 @@
-import { eq, ne, sql } from 'drizzle-orm';
+import { and, eq, isNull, ne, sql } from 'drizzle-orm';
 import { Router } from 'express';
 import { z } from 'zod';
 import { hashPassword, verifyPassword } from '../auth/password.js';
@@ -24,14 +24,14 @@ function firstIssue(error: z.ZodError): string {
 export function usersRouter(db: Db): Router {
   const router = Router();
 
-  // GET /api/users — everyone except the requester, ordered by display name
-  // (case-insensitive) for a stable directory.
+  // GET /api/users — everyone except the requester (and soft-deleted bots),
+  // ordered by display name (case-insensitive) for a stable directory.
   router.get('/', requireAuth, (req, res) => {
     const me = req.user!;
     const rows = db
       .select()
       .from(users)
-      .where(ne(users.id, me.id))
+      .where(and(ne(users.id, me.id), isNull(users.deletedAt)))
       .orderBy(sql`lower(${users.displayName})`)
       .all();
     res.status(200).json({ users: rows.map(toUserDTO) });

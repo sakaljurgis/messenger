@@ -493,6 +493,64 @@ describe('PATCH /api/chats/:id/members', () => {
   });
 });
 
+describe('PATCH /api/chats/:id — rename', () => {
+  let app: App;
+  let events: ChatEvents;
+  let alice: Actor;
+  let bob: Actor;
+  beforeEach(async () => {
+    ({ app, events } = makeAppWithEvents());
+    alice = await register(app, 'alice@example.com', 'Alice');
+    bob = await register(app, 'bob@example.com', 'Bob');
+  });
+
+  it('renames a group (trimmed) and emits chat:updated', async () => {
+    const group = (
+      await alice.agent.post('/api/chats').send({ name: 'Old Name', memberIds: [bob.user.id] })
+    ).body.chat.id as number;
+
+    const updates: ChatUpdatedEvent[] = [];
+    events.on('chat:updated', (e) => updates.push(e));
+
+    const res = await bob.agent.patch(`/api/chats/${group}`).send({ name: '  New Name  ' });
+    expect(res.status).toBe(200);
+    expect(res.body.chat.name).toBe('New Name');
+
+    expect(updates).toHaveLength(1);
+    expect(updates[0]!.chat.name).toBe('New Name');
+    expect(updates[0]!.addedMemberIds).toEqual([]);
+    expect(new Set(updates[0]!.memberIds)).toEqual(new Set([alice.user.id, bob.user.id]));
+
+    // Persisted for everyone.
+    expect((await summary(alice, group)).name).toBe('New Name');
+  });
+
+  it('rejects renaming a DM with 400', async () => {
+    const dm = (await alice.agent.post('/api/chats').send({ userId: bob.user.id })).body
+      .chat.id as number;
+    const res = await alice.agent.patch(`/api/chats/${dm}`).send({ name: 'Us' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Cannot rename a DM');
+  });
+
+  it('rejects an empty name with 400', async () => {
+    const group = (
+      await alice.agent.post('/api/chats').send({ name: 'G', memberIds: [bob.user.id] })
+    ).body.chat.id as number;
+    const res = await alice.agent.patch(`/api/chats/${group}`).send({ name: '   ' });
+    expect(res.status).toBe(400);
+  });
+
+  it('hides the group from non-members (404)', async () => {
+    const carol = await register(app, 'carol@example.com', 'Carol');
+    const group = (
+      await alice.agent.post('/api/chats').send({ name: 'G', memberIds: [bob.user.id] })
+    ).body.chat.id as number;
+    const res = await carol.agent.patch(`/api/chats/${group}`).send({ name: 'Hijacked' });
+    expect(res.status).toBe(404);
+  });
+});
+
 describe('POST /api/chats/:id/leave', () => {
   let app: App;
   let events: ChatEvents;
