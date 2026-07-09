@@ -87,6 +87,8 @@ const dmChat: ChatSummaryDTO = {
 function stubFetch(options: {
   messages: MessageDTO[];
   chat?: ChatSummaryDTO;
+  /** Directory returned by GET /api/users (for the group-info add-members picker). */
+  users?: UserDTO[];
   onPost?: (body: unknown) => MessageDTO;
   onPatch?: (body: { content: string; mentions?: number[] }, id: number) => MessageDTO;
 }) {
@@ -96,6 +98,9 @@ function stubFetch(options: {
     const method = init?.method ?? 'GET';
 
     if (url.endsWith('/api/auth/me')) return jsonResponse(200, { user: me });
+    if (url.endsWith('/api/users')) return jsonResponse(200, { users: options.users ?? [] });
+    if (url.endsWith('/leave') && method === 'POST') return jsonResponse(204, {});
+    if (url.endsWith('/members') && method === 'PATCH') return jsonResponse(200, { chat });
     if (url.match(/\/api\/chats\/\d+$/)) return jsonResponse(200, { chat });
     if (url.includes('/messages') && method === 'GET') {
       return jsonResponse(200, { messages: options.messages, nextCursor: null });
@@ -480,5 +485,100 @@ describe('ChatPage', () => {
     await emitFromServer('typing', { chatId: 10, userId: carol.id });
 
     expect(screen.getByText('Bob and Carol are typing…')).toBeInTheDocument();
+  });
+
+  it('renders received DM bubbles without the avatar gutter (full-width rows)', async () => {
+    stubFetch({ messages: [msg(1, bob, 'Hi from Bob')] });
+    const { container } = renderChatPage();
+    await screen.findByText('Hi from Bob');
+
+    // The w-8 spacer column exists only in groups (it holds the sender avatar).
+    expect(container.querySelector('.w-8.flex-shrink-0')).toBeNull();
+  });
+
+  it('group: sender avatar has a hover title and tapping it reveals the name', async () => {
+    const group: ChatSummaryDTO = {
+      id: 10, type: 'group', name: 'Team', members: [me, bob], lastMessage: null, unreadCount: 0,
+    };
+    stubFetch({ messages: [msg(1, bob, 'hi team'), msg(2, bob, 'again')], chat: group });
+    const { container } = renderChatPage();
+    await screen.findByText('hi team');
+
+    // Gutter present in groups; sender label only on the first message of the run.
+    expect(container.querySelector('.w-8.flex-shrink-0')).not.toBeNull();
+    expect(screen.getAllByText('Bob')).toHaveLength(1);
+
+    const avatarButton = screen.getByRole('button', { name: 'Sent by Bob' });
+    expect(avatarButton).toHaveAttribute('title', 'Bob');
+
+    // Tap (mobile has no hover): the name appears on the avatar's own row too.
+    await userEvent.click(avatarButton);
+    expect(screen.getAllByText('Bob')).toHaveLength(2);
+  });
+
+  it('group info: lists members and PATCHes newly added ones', async () => {
+    const carol: ChatMemberDTO = {
+      id: 3, email: 'carol@example.com', displayName: 'Carol', isBot: false, lastReadMessageId: 0,
+    };
+    const dave: UserDTO = { id: 4, email: 'dave@example.com', displayName: 'Dave', isBot: false };
+    const group: ChatSummaryDTO = {
+      id: 10, type: 'group', name: 'Team', members: [me, bob, carol], lastMessage: null, unreadCount: 0,
+    };
+    const fetchMock = stubFetch({
+      messages: [msg(1, bob, 'hi team')],
+      chat: group,
+      users: [bob, carol, dave],
+    });
+    renderChatPage();
+    await screen.findByText('hi team');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Group info' }));
+    expect(await screen.findByText('(you)')).toBeInTheDocument();
+    expect(screen.getByText('Carol')).toBeInTheDocument();
+
+    // Dave isn't a member yet — select him and add.
+    await userEvent.click(screen.getByRole('button', { name: /Dave/ }));
+    await userEvent.click(screen.getByRole('button', { name: /^Add/ }));
+
+    await waitFor(() => {
+      const patch = fetchMock.mock.calls.find(
+        ([input, init]) => input.toString().endsWith('/members') && init?.method === 'PATCH',
+      );
+      expect(patch).toBeDefined();
+      expect(JSON.parse(patch?.[1]?.body as string)).toEqual({ memberIds: [4] });
+    });
+  });
+
+  it('group info: leaving POSTs /leave and navigates back to the chat list', async () => {
+    const group: ChatSummaryDTO = {
+      id: 10, type: 'group', name: 'Team', members: [me, bob], lastMessage: null, unreadCount: 0,
+    };
+    const fetchMock = stubFetch({ messages: [msg(1, bob, 'hi team')], chat: group, users: [bob] });
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    try {
+      renderChatPage();
+      await screen.findByText('hi team');
+
+      await userEvent.click(screen.getByRole('button', { name: 'Group info' }));
+      await userEvent.click(await screen.findByRole('button', { name: 'Leave group' }));
+
+      expect(await screen.findByText('Chat list')).toBeInTheDocument();
+      const leave = fetchMock.mock.calls.find(
+        ([input, init]) => input.toString().endsWith('/leave') && init?.method === 'POST',
+      );
+      expect(leave).toBeDefined();
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+
+  it('navigates away when the server signals chat:removed (left in another tab)', async () => {
+    stubFetch({ messages: [msg(1, bob, 'Hi from Bob')] });
+    renderChatPage();
+    await screen.findByText('Hi from Bob');
+
+    await emitFromServer('chat:removed', { chatId: 10 });
+
+    expect(await screen.findByText('Chat list')).toBeInTheDocument();
   });
 });

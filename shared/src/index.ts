@@ -104,6 +104,19 @@ export interface MarkReadRequest {
   messageId: number;
 }
 
+/** PATCH /api/users/me — update own profile. */
+export interface UpdateProfileRequest {
+  /** Trimmed, 1–100 chars (same rule as registration). */
+  displayName: string;
+}
+
+/** PUT /api/users/me/password — change own password (204 on success). */
+export interface ChangePasswordRequest {
+  currentPassword: string;
+  /** 8–200 chars (same rule as registration). */
+  newPassword: string;
+}
+
 // ---------- Responses ----------
 
 export interface AuthResponse {
@@ -120,6 +133,24 @@ export interface ApiErrorBody {
   error: string;
 }
 
+// ---------- Bot management ----------
+
+/**
+ * A bot as returned to the humans who manage it (GET /api/bots, PATCH
+ * /api/bots/:id). Extends UserDTO with the editable outbound webhookUrl.
+ * NEVER carries apiToken or passwordHash — those are omitted server-side.
+ */
+export interface BotDTO extends UserDTO {
+  /** Outbound webhook URL the server POSTs new messages to, or null when unset. */
+  webhookUrl: string | null;
+}
+
+/** PATCH /api/bots/:id — set or clear a bot's outbound webhook URL. */
+export interface UpdateBotRequest {
+  /** An http(s) URL, or null/empty string to clear the webhook. */
+  webhookUrl: string | null;
+}
+
 // ---------- Socket.IO events ----------
 
 export interface ServerToClientEvents {
@@ -128,6 +159,8 @@ export interface ServerToClientEvents {
   'message:updated': (message: MessageDTO) => void;
   'chat:new': (chat: ChatSummaryDTO) => void;
   'chat:updated': (chat: ChatSummaryDTO) => void;
+  /** The recipient is no longer a member of this chat (they left) — drop it from the UI. */
+  'chat:removed': (data: { chatId: number }) => void;
   /** A member's read marker advanced in a chat (never fires on a no-op/backwards read). */
   'read:updated': (data: { chatId: number; userId: number; lastReadMessageId: number }) => void;
   /** A member is typing in a chat — a transient signal relayed to the chat's other members. */

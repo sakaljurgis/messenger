@@ -1,4 +1,4 @@
-import type { UserDTO } from '@messenger/shared';
+import type { BotDTO, UserDTO } from '@messenger/shared';
 import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../app.js';
@@ -89,6 +89,156 @@ describe('POST /api/bots', () => {
     expect(found).toBeDefined();
     expect(found!.isBot).toBe(true);
     expect(found!.displayName).toBe('Echo Bot');
+  });
+});
+
+describe('GET /api/bots', () => {
+  let db: Db;
+  let app: App;
+  let alice: Actor;
+
+  beforeEach(async () => {
+    db = createDb(':memory:');
+    app = createApp(db);
+    alice = await register(app, 'alice@example.com', 'Alice');
+  });
+
+  it('lists bots with their webhookUrl but never credentials', async () => {
+    await createBot(alice, 'Echo Bot', 'https://bot.example.com/webhook');
+    await createBot(alice, 'Silent Bot');
+
+    const res = await alice.agent.get('/api/bots');
+    expect(res.status).toBe(200);
+
+    const bots = res.body.bots as BotDTO[];
+    expect(bots).toHaveLength(2);
+
+    const echo = bots.find((b) => b.displayName === 'Echo Bot')!;
+    expect(echo).toBeDefined();
+    expect(echo.isBot).toBe(true);
+    expect(echo.webhookUrl).toBe('https://bot.example.com/webhook');
+
+    const silent = bots.find((b) => b.displayName === 'Silent Bot')!;
+    expect(silent.webhookUrl).toBeNull();
+
+    // No credentials leak in the list.
+    for (const bot of bots) {
+      const botAny = bot as unknown as Record<string, unknown>;
+      expect(botAny.apiToken).toBeUndefined();
+      expect(botAny.passwordHash).toBeUndefined();
+    }
+  });
+
+  it('does not include human users', async () => {
+    await register(app, 'bob@example.com', 'Bob');
+    await createBot(alice, 'Echo Bot');
+
+    const res = await alice.agent.get('/api/bots');
+    expect(res.status).toBe(200);
+    const bots = res.body.bots as BotDTO[];
+    expect(bots).toHaveLength(1);
+    expect(bots[0]!.displayName).toBe('Echo Bot');
+  });
+
+  it('requires authentication', async () => {
+    const res = await request(app).get('/api/bots');
+    expect(res.status).toBe(401);
+  });
+});
+
+describe('PATCH /api/bots/:id', () => {
+  let db: Db;
+  let app: App;
+  let alice: Actor;
+
+  beforeEach(async () => {
+    db = createDb(':memory:');
+    app = createApp(db);
+    alice = await register(app, 'alice@example.com', 'Alice');
+  });
+
+  it('updates a bot webhookUrl and returns the updated BotDTO', async () => {
+    const { bot } = await createBot(alice, 'Echo Bot', 'https://old.example.com/hook');
+
+    const res = await alice.agent
+      .patch(`/api/bots/${bot.id}`)
+      .send({ webhookUrl: 'https://new.example.com/hook' });
+    expect(res.status).toBe(200);
+
+    const updated = res.body.bot as BotDTO;
+    expect(updated.id).toBe(bot.id);
+    expect(updated.webhookUrl).toBe('https://new.example.com/hook');
+    const botAny = updated as unknown as Record<string, unknown>;
+    expect(botAny.apiToken).toBeUndefined();
+
+    // Persisted: a subsequent list reflects the new URL.
+    const list = await alice.agent.get('/api/bots');
+    const found = (list.body.bots as BotDTO[]).find((b) => b.id === bot.id)!;
+    expect(found.webhookUrl).toBe('https://new.example.com/hook');
+  });
+
+  it('clears the webhookUrl when sent null', async () => {
+    const { bot } = await createBot(alice, 'Echo Bot', 'https://bot.example.com/hook');
+
+    const res = await alice.agent.patch(`/api/bots/${bot.id}`).send({ webhookUrl: null });
+    expect(res.status).toBe(200);
+    expect((res.body.bot as BotDTO).webhookUrl).toBeNull();
+  });
+
+  it('clears the webhookUrl when sent an empty string', async () => {
+    const { bot } = await createBot(alice, 'Echo Bot', 'https://bot.example.com/hook');
+
+    const res = await alice.agent.patch(`/api/bots/${bot.id}`).send({ webhookUrl: '' });
+    expect(res.status).toBe(200);
+    expect((res.body.bot as BotDTO).webhookUrl).toBeNull();
+  });
+
+  it('rejects a non-http(s) webhookUrl with 400', async () => {
+    const { bot } = await createBot(alice, 'Echo Bot');
+
+    const res = await alice.agent
+      .patch(`/api/bots/${bot.id}`)
+      .send({ webhookUrl: 'ftp://bot.example.com/hook' });
+    expect(res.status).toBe(400);
+    expect(typeof res.body.error).toBe('string');
+  });
+
+  it('rejects a malformed webhookUrl with 400', async () => {
+    const { bot } = await createBot(alice, 'Echo Bot');
+
+    const res = await alice.agent.patch(`/api/bots/${bot.id}`).send({ webhookUrl: 'not-a-url' });
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 404 when the id is a human user (no existence leak)', async () => {
+    const bob = await register(app, 'bob@example.com', 'Bob');
+
+    const res = await alice.agent
+      .patch(`/api/bots/${bob.user.id}`)
+      .send({ webhookUrl: 'https://bot.example.com/hook' });
+    expect(res.status).toBe(404);
+  });
+
+  it('returns 404 for an unknown id', async () => {
+    const res = await alice.agent
+      .patch('/api/bots/999999')
+      .send({ webhookUrl: 'https://bot.example.com/hook' });
+    expect(res.status).toBe(404);
+  });
+
+  it('returns 404 for a non-numeric id', async () => {
+    const res = await alice.agent
+      .patch('/api/bots/not-a-number')
+      .send({ webhookUrl: 'https://bot.example.com/hook' });
+    expect(res.status).toBe(404);
+  });
+
+  it('requires authentication', async () => {
+    const { bot } = await createBot(alice, 'Echo Bot');
+    const res = await request(app)
+      .patch(`/api/bots/${bot.id}`)
+      .send({ webhookUrl: 'https://bot.example.com/hook' });
+    expect(res.status).toBe(401);
   });
 });
 

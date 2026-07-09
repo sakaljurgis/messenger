@@ -27,13 +27,15 @@ const PAGE_LIMIT = 30;
 // Pure helpers (unit-tested; no React, no I/O)
 // ---------------------------------------------------------------------------
 
-/** Group → its name; DM → the *other* member's display name. */
+/** Group → its name; DM → the *other* member's display name; self-DM → "Notes to self". */
 export function chatTitle(chat: ChatSummaryDTO, meId: number): string {
   if (chat.type === 'group') {
     return chat.name ?? 'Group';
   }
   const other = chat.members.find((m) => m.id !== meId);
-  return other?.displayName ?? chat.name ?? 'Conversation';
+  if (other) return other.displayName;
+  if (chat.members.some((m) => m.id === meId)) return 'Notes to self';
+  return chat.name ?? 'Conversation';
 }
 
 /** The other participant of a DM (undefined for groups / degenerate chats). */
@@ -300,6 +302,10 @@ export function useChats(): UseChatsResult {
   // chat:new / chat:updated carry a full server-truth summary — apply directly.
   useSocketEvent('chat:new', (chat) => setChats((prev) => upsertChat(prev, chat)));
   useSocketEvent('chat:updated', (chat) => setChats((prev) => upsertChat(prev, chat)));
+  // I left the chat (possibly in another tab) — drop it from the list.
+  useSocketEvent('chat:removed', ({ chatId }) =>
+    setChats((prev) => prev.filter((c) => c.id !== chatId)),
+  );
   // A new message changes ordering and (someone else's) unread count; refetch so
   // the list matches the server's read-aware counts rather than guessing locally.
   useSocketEvent('message:new', () => void load());
@@ -316,6 +322,8 @@ export interface UseChatResult {
   chat: ChatSummaryDTO | null;
   loading: boolean;
   error: string | null;
+  /** True once the server signals I'm no longer a member (I left, maybe in another tab). */
+  removed: boolean;
   refresh: () => void;
 }
 
@@ -330,6 +338,7 @@ export function useChat(chatId: number): UseChatResult {
   const [chat, setChat] = useState<ChatSummaryDTO | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [removed, setRemoved] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -345,6 +354,7 @@ export function useChat(chatId: number): UseChatResult {
 
   useEffect(() => {
     setLoading(true);
+    setRemoved(false);
     void load();
   }, [load]);
 
@@ -352,6 +362,10 @@ export function useChat(chatId: number): UseChatResult {
 
   useSocketEvent('chat:updated', (updated) => {
     if (updated.id === chatId) setChat(updated);
+  });
+
+  useSocketEvent('chat:removed', ({ chatId: removedChatId }) => {
+    if (removedChatId === chatId) setRemoved(true);
   });
 
   // A member's read marker advanced: patch just that member in place rather
@@ -367,7 +381,7 @@ export function useChat(chatId: number): UseChatResult {
     });
   });
 
-  return { chat, loading, error, refresh: () => void load() };
+  return { chat, loading, error, removed, refresh: () => void load() };
 }
 
 export interface UseMessagesResult {

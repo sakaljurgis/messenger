@@ -15,7 +15,7 @@ import {
   listMessages,
 } from '../chats/service.js';
 import type { Db } from '../db/index.js';
-import { chatMembers, chats, users, type ChatRow } from '../db/schema.js';
+import { attachments, chatMembers, chats, users, type ChatRow } from '../db/schema.js';
 import type { ChatEvents } from '../events.js';
 import type { Storage } from '../storage.js';
 
@@ -99,11 +99,9 @@ export function chatsRouter(db: Db, events: ChatEvents, storage: Storage): Route
         res.status(400).json({ error: firstIssue(parsed.error) });
         return;
       }
+      // targetId === me.id is allowed: a self-DM ("notes to self") with a
+      // single member row and dmKey "id:id".
       const targetId = parsed.data.userId;
-      if (targetId === me.id) {
-        res.status(400).json({ error: 'Cannot chat with yourself' });
-        return;
-      }
       const target = db.select().from(users).where(eq(users.id, targetId)).get();
       if (!target) {
         res.status(404).json({ error: 'User not found' });
@@ -135,14 +133,10 @@ export function chatsRouter(db: Db, events: ChatEvents, storage: Storage): Route
         }
         throw err;
       }
+      const memberIds = targetId === me.id ? [me.id] : [me.id, targetId];
       db.insert(chatMembers)
-        .values([
-          { chatId: chat.id, userId: me.id },
-          { chatId: chat.id, userId: targetId },
-        ])
+        .values(memberIds.map((userId) => ({ chatId: chat.id, userId })))
         .run();
-
-      const memberIds = [me.id, targetId];
       events.emit('chat:new', { chat, memberIds });
       res.status(201).json({ chat: getChatSummaryForUser(db, chat.id, me.id)! });
       return;
@@ -405,6 +399,50 @@ export function chatsRouter(db: Db, events: ChatEvents, storage: Storage): Route
       });
     }
     res.status(200).json({ chat: getChatSummaryForUser(db, chat.id, me.id)! });
+  });
+
+  // POST /api/chats/:id/leave — leave a group (any member may). The last member
+  // out deletes the chat: rows cascade, attachment files are unlinked from disk.
+  router.post('/:id/leave', requireAuth, (req, res) => {
+    const me = req.user!;
+    const chatId = parseId(req.params.id);
+    const chat = chatId === null ? undefined : getChatForMember(db, chatId, me.id);
+    if (!chat) {
+      res.status(404).json(CHAT_NOT_FOUND);
+      return;
+    }
+    if (chat.type === 'dm') {
+      res.status(400).json({ error: 'Cannot leave a DM' });
+      return;
+    }
+
+    db.delete(chatMembers)
+      .where(and(eq(chatMembers.chatId, chat.id), eq(chatMembers.userId, me.id)))
+      .run();
+
+    const remaining = getMemberIds(db, chat.id);
+    if (remaining.length === 0) {
+      // Capture file names before the chat delete cascades the attachment rows.
+      const files = db
+        .select({ storagePath: attachments.storagePath, thumbPath: attachments.thumbPath })
+        .from(attachments)
+        .where(eq(attachments.chatId, chat.id))
+        .all();
+      db.delete(chats).where(eq(chats.id, chat.id)).run();
+      for (const f of files) {
+        storage.remove(f.storagePath);
+        if (f.thumbPath) storage.remove(f.thumbPath);
+      }
+    }
+    // Emitted even for the last member: memberIds=[] relays nothing, while
+    // removedMemberIds tells the leaver's other tabs/devices to drop the chat.
+    events.emit('chat:updated', {
+      chat,
+      memberIds: remaining,
+      addedMemberIds: [],
+      removedMemberIds: [me.id],
+    });
+    res.status(204).end();
   });
 
   return router;

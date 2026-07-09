@@ -188,6 +188,33 @@ describe('Socket.IO real-time', () => {
     );
   });
 
+  it('delivers chat:removed to the leaver and chat:updated to remaining members on leave', async () => {
+    const alice = await register(ctx.app, 'alice@example.com', 'Alice');
+    const bob = await register(ctx.app, 'bob@example.com', 'Bob');
+
+    const group = await request(ctx.app)
+      .post('/api/chats')
+      .set('Cookie', alice.cookie)
+      .send({ name: 'Team', memberIds: [bob.user.id] });
+    const chatId = group.body.chat.id as number;
+
+    const aliceSocket = connect(alice.cookie);
+    const bobSocket = connect(bob.cookie);
+    await waitConnect(aliceSocket);
+    await waitConnect(bobSocket);
+
+    const removed = waitFor<{ chatId: number }>(bobSocket, 'chat:removed');
+    const updated = waitFor<ChatSummaryDTO>(aliceSocket, 'chat:updated');
+
+    await request(ctx.app).post(`/api/chats/${chatId}/leave`).set('Cookie', bob.cookie);
+
+    // The leaver's clients get the drop signal; the rest get the fresh roster.
+    expect(await removed).toEqual({ chatId });
+    const summary = await updated;
+    expect(summary.id).toBe(chatId);
+    expect(summary.members.map((m) => m.id)).toEqual([alice.user.id]);
+  });
+
   it('delivers read:updated to a connected member when another member POSTs /read', async () => {
     const alice = await register(ctx.app, 'alice@example.com', 'Alice');
     const bob = await register(ctx.app, 'bob@example.com', 'Bob');

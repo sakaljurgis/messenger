@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import type { AttachmentDTO, ChatMemberDTO, MessageDTO, UserDTO } from '@messenger/shared';
 import { useAuth } from '../lib/auth';
 import { splitByMentions } from '../lib/mentions';
@@ -19,6 +19,7 @@ import { useOnlineUsers } from '../lib/presence';
 import { attachmentUrl, formatBytes } from '../lib/attachments';
 import Avatar from '../components/Avatar';
 import Composer from '../components/Composer';
+import GroupInfo from '../components/GroupInfo';
 import Lightbox from '../components/Lightbox';
 
 const NEAR_BOTTOM_PX = 100;
@@ -364,6 +365,7 @@ function MessageRow({
   row,
   members,
   meId,
+  isGroup,
   onOpenImage,
   onEdit,
   onDelete,
@@ -371,12 +373,15 @@ function MessageRow({
   row: Row;
   members: UserDTO[];
   meId: number;
+  isGroup: boolean;
   onOpenImage: (a: AttachmentDTO) => void;
   onEdit: (message: MessageDTO) => void;
   onDelete: (message: MessageDTO) => void;
 }) {
   const { message, isMine, showSender, showAvatar, showTime, isRunStart } = row;
   const spacing = isRunStart ? 'mt-3' : 'mt-0.5';
+  // Tapping the sender avatar reveals the name on this row (mobile has no hover).
+  const [nameRevealed, setNameRevealed] = useState(false);
 
   if (isMine) {
     return (
@@ -398,11 +403,23 @@ function MessageRow({
   return (
     <div className={`flex justify-start px-3 ${spacing}`}>
       <div className="flex max-w-[75%] items-end gap-2">
-        <div className="w-8 flex-shrink-0">
-          {showAvatar && <Avatar name={message.sender.displayName} id={message.sender.id} size="sm" />}
-        </div>
+        {isGroup && (
+          <div className="w-8 flex-shrink-0">
+            {showAvatar && (
+              <button
+                type="button"
+                title={message.sender.displayName}
+                aria-label={`Sent by ${message.sender.displayName}`}
+                onClick={() => setNameRevealed((v) => !v)}
+                className="block rounded-full"
+              >
+                <Avatar name={message.sender.displayName} id={message.sender.id} size="sm" />
+              </button>
+            )}
+          </div>
+        )}
         <div className="flex min-w-0 flex-col items-start">
-          {showSender && (
+          {(showSender || nameRevealed) && (
             <span className="mb-0.5 ml-1 text-xs text-gray-500">{message.sender.displayName}</span>
           )}
           {message.isDeleted ? (
@@ -435,12 +452,12 @@ function typingLabel(names: string[]): string {
  * dots and a tiny label. Rendered below the last message, inside the scroll area,
  * so it never yanks the viewport around. Nothing shows when no one is typing.
  */
-function TypingIndicator({ names }: { names: string[] }) {
+function TypingIndicator({ names, isGroup }: { names: string[]; isGroup: boolean }) {
   if (names.length === 0) return null;
   return (
     <div className="mt-2 flex justify-start px-3" aria-live="polite">
       <div className="flex items-end gap-2">
-        <div className="w-8 flex-shrink-0" />
+        {isGroup && <div className="w-8 flex-shrink-0" />}
         <div className="flex flex-col items-start gap-0.5">
           <div className="flex items-center gap-1 rounded-2xl bg-gray-200 px-3.5 py-3">
             {[0, 1, 2].map((i) => (
@@ -464,9 +481,15 @@ export default function ChatPage() {
   const { user } = useAuth();
   const meId = user?.id ?? -1;
 
-  const { chat } = useChat(chatId);
+  const navigate = useNavigate();
+  const { chat, removed } = useChat(chatId);
   const { messages, loadOlder, hasMore, sendMessage, editMessage, deleteMessage, loading } =
     useMessages(chatId);
+
+  // I'm no longer a member (left the group, maybe in another tab) — bail out.
+  useEffect(() => {
+    if (removed) navigate('/chats');
+  }, [removed, navigate]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -475,6 +498,7 @@ export default function ChatPage() {
   const lastMarkedId = useRef<number>(-1);
   const [lightbox, setLightbox] = useState<AttachmentDTO | null>(null);
   const [editing, setEditing] = useState<MessageDTO | null>(null);
+  const [showInfo, setShowInfo] = useState(false);
 
   const isGroup = chat?.type === 'group';
   const title = chat ? chatTitle(chat, meId) : 'Chat';
@@ -574,12 +598,21 @@ export default function ChatPage() {
             online={otherOnline}
           />
         )}
-        <div className="min-w-0">
-          <h1 className="truncate font-semibold text-gray-900">{title}</h1>
-          {isGroup && chat && (
-            <p className="truncate text-xs text-gray-500">{chat.members.length} members</p>
-          )}
-        </div>
+        {isGroup ? (
+          <button
+            type="button"
+            onClick={() => setShowInfo(true)}
+            aria-label="Group info"
+            className="min-w-0 flex-1 rounded-lg px-1 text-left transition-colors hover:bg-gray-50"
+          >
+            <h1 className="truncate font-semibold text-gray-900">{title}</h1>
+            {chat && <p className="truncate text-xs text-gray-500">{chat.members.length} members</p>}
+          </button>
+        ) : (
+          <div className="min-w-0">
+            <h1 className="truncate font-semibold text-gray-900">{title}</h1>
+          </div>
+        )}
       </header>
 
       <div ref={scrollRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto py-2">
@@ -615,6 +648,7 @@ export default function ChatPage() {
                 row={row}
                 members={members}
                 meId={meId}
+                isGroup={isGroup}
                 onOpenImage={setLightbox}
                 onEdit={setEditing}
                 onDelete={handleDelete}
@@ -623,7 +657,7 @@ export default function ChatPage() {
             </div>
           ))
         )}
-        <TypingIndicator names={typingNames} />
+        <TypingIndicator names={typingNames} isGroup={isGroup} />
         <div ref={bottomRef} />
       </div>
 
@@ -638,6 +672,9 @@ export default function ChatPage() {
       />
 
       {lightbox && <Lightbox attachment={lightbox} onClose={() => setLightbox(null)} />}
+      {showInfo && isGroup && chat && (
+        <GroupInfo chat={chat} meId={meId} onClose={() => setShowInfo(false)} />
+      )}
     </div>
   );
 }

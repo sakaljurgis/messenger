@@ -18,6 +18,8 @@ interface AuthContextValue {
   login: (email: string, password: string) => Promise<void>;
   register: (email: string, password: string, displayName: string) => Promise<void>;
   logout: () => Promise<void>;
+  /** Apply an updated own profile (e.g. after PATCH /api/users/me). */
+  updateUser: (user: UserDTO) => void;
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
@@ -49,9 +51,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // Real-time lifecycle: hold a live socket exactly while a user is signed in.
   // Connecting only after `user` is set guarantees the session cookie exists for
-  // the handshake; the cleanup disconnects on logout (user -> null).
+  // the handshake; the cleanup disconnects on logout (user -> null). Keyed on
+  // the id (not the object) so a profile update doesn't bounce the socket.
+  const userId = user?.id ?? null;
   useEffect(() => {
-    if (!user) return;
+    if (userId === null) return;
     // Wire the presence store's socket listeners (idempotent) before opening the
     // connection, so the server's on-connect snapshot is never missed.
     initPresence();
@@ -59,7 +63,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => {
       disconnectSocket();
     };
-  }, [user]);
+  }, [userId]);
 
   const login = useCallback(async (email: string, password: string) => {
     const res = await apiPost<AuthResponse>('/api/auth/login', { email, password });
@@ -76,9 +80,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null);
   }, []);
 
+  const updateUser = useCallback((next: UserDTO) => setUser(next), []);
+
   const value = useMemo<AuthContextValue>(
-    () => ({ user, loading, login, register, logout }),
-    [user, loading, login, register, logout],
+    () => ({ user, loading, login, register, logout, updateUser }),
+    [user, loading, login, register, logout, updateUser],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

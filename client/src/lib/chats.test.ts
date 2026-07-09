@@ -71,6 +71,18 @@ describe('chatTitle', () => {
     };
     expect(chatTitle(group, ann.id)).toBe('Team Rocket');
   });
+
+  it('titles a self-DM (only me as member) "Notes to self"', () => {
+    const selfDm: ChatSummaryDTO = {
+      id: 3,
+      type: 'dm',
+      name: null,
+      members: [ann],
+      lastMessage: null,
+      unreadCount: 0,
+    };
+    expect(chatTitle(selfDm, ann.id)).toBe('Notes to self');
+  });
 });
 
 describe('chatInitials', () => {

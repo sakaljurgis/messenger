@@ -9,6 +9,7 @@ import ChatListPage from './pages/ChatListPage';
 import ChatPage from './pages/ChatPage';
 import NewGroupPage from './pages/NewGroupPage';
 import SettingsPage from './pages/SettingsPage';
+import BotsPage from './pages/BotsPage';
 
 export default function App() {
   return (
@@ -25,6 +26,7 @@ export default function App() {
               <Route path="/chats" element={<ChatListPage />} />
               <Route path="/users" element={<UsersPage />} />
               <Route path="/settings" element={<SettingsPage />} />
+              <Route path="/bots" element={<BotsPage />} />
             </Route>
             {/* Full-screen screens (own header, no bottom tabs), Messenger-style. */}
             <Route path="/chats/new-group" element={<NewGroupPage />} />

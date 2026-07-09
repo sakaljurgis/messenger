@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import type { UserDTO } from '@messenger/shared';
@@ -73,5 +73,95 @@ describe('SettingsPage — notifications', () => {
 
     expect(await screen.findByText(/blocked in your browser settings/i)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /notifications/i })).not.toBeInTheDocument();
+  });
+});
+
+describe('SettingsPage — profile', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.clearAllMocks();
+  });
+
+  function renderWithFetch(fetchMock: typeof fetch) {
+    vi.stubGlobal('fetch', fetchMock);
+    render(
+      <MemoryRouter initialEntries={['/settings']}>
+        <AuthProvider>
+          <Routes>
+            <Route path="/settings" element={<SettingsPage />} />
+          </Routes>
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+  }
+
+  it('saves an edited display name via PATCH /api/users/me', async () => {
+    push.getPushState.mockResolvedValue('disabled');
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = input.toString();
+      if (url.endsWith('/api/auth/me')) return jsonResponse(200, { user: me });
+      if (url.endsWith('/api/users/me') && init?.method === 'PATCH') {
+        const body = JSON.parse(init.body as string) as { displayName: string };
+        return jsonResponse(200, { user: { ...me, displayName: body.displayName } });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    renderWithFetch(fetchMock as unknown as typeof fetch);
+
+    const input = await screen.findByLabelText('Display name');
+    await waitFor(() => expect(input).toHaveValue('Me'));
+
+    await userEvent.clear(input);
+    await userEvent.type(input, 'New Me');
+    await userEvent.click(screen.getByRole('button', { name: /save name/i }));
+
+    expect(await screen.findByText('Name updated')).toBeInTheDocument();
+    const patch = fetchMock.mock.calls.find(
+      ([i, init]) => i.toString().endsWith('/api/users/me') && init?.method === 'PATCH',
+    );
+    expect(JSON.parse(patch?.[1]?.body as string)).toEqual({ displayName: 'New Me' });
+  });
+
+  it('changes the password via PUT and surfaces a wrong current password', async () => {
+    push.getPushState.mockResolvedValue('disabled');
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = input.toString();
+      if (url.endsWith('/api/auth/me')) return jsonResponse(200, { user: me });
+      if (url.endsWith('/api/users/me/password') && init?.method === 'PUT') {
+        const body = JSON.parse(init.body as string) as { currentPassword: string };
+        return body.currentPassword === 'correct-horse'
+          ? jsonResponse(204, {})
+          : jsonResponse(400, { error: 'Current password is incorrect' });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    renderWithFetch(fetchMock as unknown as typeof fetch);
+
+    const current = await screen.findByLabelText('Current password');
+    const next = screen.getByLabelText('New password');
+
+    // Wrong current password → server error surfaces inline.
+    await userEvent.type(current, 'wrong-password');
+    await userEvent.type(next, 'battery-staple');
+    await userEvent.click(screen.getByRole('button', { name: /change password/i }));
+    expect(await screen.findByText('Current password is incorrect')).toBeInTheDocument();
+
+    // Correct current password → success message, fields cleared.
+    await userEvent.clear(current);
+    await userEvent.clear(next);
+    await userEvent.type(current, 'correct-horse');
+    await userEvent.type(next, 'battery-staple');
+    await userEvent.click(screen.getByRole('button', { name: /change password/i }));
+    expect(await screen.findByText('Password changed')).toBeInTheDocument();
+    expect(current).toHaveValue('');
+    expect(next).toHaveValue('');
+  });
+
+  it('links to the bots management page', async () => {
+    push.getPushState.mockResolvedValue('disabled');
+    renderSettings();
+
+    const link = await screen.findByRole('link', { name: /manage bots/i });
+    expect(link).toHaveAttribute('href', '/bots');
   });
 });

@@ -59,3 +59,82 @@ describe('GET /api/users', () => {
     });
   });
 });
+
+describe('PATCH /api/users/me', () => {
+  let app: ReturnType<typeof createApp>;
+  beforeEach(() => {
+    app = makeApp();
+  });
+
+  it('requires authentication', async () => {
+    const res = await request(app).patch('/api/users/me').send({ displayName: 'X' });
+    expect(res.status).toBe(401);
+  });
+
+  it('updates the display name (trimmed) and returns the fresh UserDTO', async () => {
+    const { agent } = await register(app, 'alice@example.com', 'Alice');
+    const res = await agent.patch('/api/users/me').send({ displayName: '  Alicia  ' });
+    expect(res.status).toBe(200);
+    expect(res.body.user.displayName).toBe('Alicia');
+    expect(res.body.user).not.toHaveProperty('passwordHash');
+
+    // Persisted: /me reflects the new name.
+    const me = await agent.get('/api/auth/me');
+    expect(me.body.user.displayName).toBe('Alicia');
+  });
+
+  it('rejects an empty display name with 400', async () => {
+    const { agent } = await register(app, 'alice@example.com', 'Alice');
+    const res = await agent.patch('/api/users/me').send({ displayName: '   ' });
+    expect(res.status).toBe(400);
+  });
+});
+
+describe('PUT /api/users/me/password', () => {
+  let app: ReturnType<typeof createApp>;
+  beforeEach(() => {
+    app = makeApp();
+  });
+
+  it('requires authentication', async () => {
+    const res = await request(app)
+      .put('/api/users/me/password')
+      .send({ currentPassword: 'supersecret', newPassword: 'evenmoresecret' });
+    expect(res.status).toBe(401);
+  });
+
+  it('rejects a wrong current password with 400', async () => {
+    const { agent } = await register(app, 'alice@example.com', 'Alice');
+    const res = await agent
+      .put('/api/users/me/password')
+      .send({ currentPassword: 'wrong-password', newPassword: 'evenmoresecret' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Current password is incorrect');
+  });
+
+  it('rejects a too-short new password with 400', async () => {
+    const { agent } = await register(app, 'alice@example.com', 'Alice');
+    const res = await agent
+      .put('/api/users/me/password')
+      .send({ currentPassword: 'supersecret', newPassword: 'short' });
+    expect(res.status).toBe(400);
+  });
+
+  it('changes the password: old stops working, new logs in', async () => {
+    const { agent } = await register(app, 'alice@example.com', 'Alice');
+    const res = await agent
+      .put('/api/users/me/password')
+      .send({ currentPassword: 'supersecret', newPassword: 'evenmoresecret' });
+    expect(res.status).toBe(204);
+
+    const oldLogin = await request(app)
+      .post('/api/auth/login')
+      .send({ email: 'alice@example.com', password: 'supersecret' });
+    expect(oldLogin.status).toBe(401);
+
+    const newLogin = await request(app)
+      .post('/api/auth/login')
+      .send({ email: 'alice@example.com', password: 'evenmoresecret' });
+    expect(newLogin.status).toBe(200);
+  });
+});

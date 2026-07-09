@@ -76,10 +76,29 @@ describe('POST /api/chats — DM', () => {
     expect(fromBob.body.chat.id).toBe(first.body.chat.id);
   });
 
-  it('rejects a self-DM with 400', async () => {
+  it('creates a self-DM ("notes to self") with a single member (201)', async () => {
     const res = await alice.agent.post('/api/chats').send({ userId: alice.user.id });
-    expect(res.status).toBe(400);
-    expect(res.body.error).toBe('Cannot chat with yourself');
+    expect(res.status).toBe(201);
+    const chat = res.body.chat as ChatSummaryDTO;
+    expect(chat.type).toBe('dm');
+    expect(chat.members.map((m) => m.id)).toEqual([alice.user.id]);
+  });
+
+  it('self-DM is idempotent like any other DM', async () => {
+    const first = await alice.agent.post('/api/chats').send({ userId: alice.user.id });
+    const second = await alice.agent.post('/api/chats').send({ userId: alice.user.id });
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(200);
+    expect(second.body.chat.id).toBe(first.body.chat.id);
+  });
+
+  it('can send and read messages in a self-DM', async () => {
+    const chatId = (await alice.agent.post('/api/chats').send({ userId: alice.user.id }))
+      .body.chat.id as number;
+    const sent = await send(alice, chatId, 'remember the milk');
+    expect(sent.status).toBe(201);
+    const page = (await alice.agent.get(`/api/chats/${chatId}/messages`)).body as MessagesPage;
+    expect(page.messages.map((m) => m.content)).toEqual(['remember the milk']);
   });
 
   it('returns 404 for an unknown target user', async () => {
@@ -471,6 +490,93 @@ describe('PATCH /api/chats/:id/members', () => {
       .patch(`/api/chats/${group}/members`)
       .send({ memberIds: [999999] });
     expect(res.status).toBe(404);
+  });
+});
+
+describe('POST /api/chats/:id/leave', () => {
+  let app: App;
+  let events: ChatEvents;
+  let alice: Actor;
+  let bob: Actor;
+  let carol: Actor;
+  beforeEach(async () => {
+    ({ app, events } = makeAppWithEvents());
+    alice = await register(app, 'alice@example.com', 'Alice');
+    bob = await register(app, 'bob@example.com', 'Bob');
+    carol = await register(app, 'carol@example.com', 'Carol');
+  });
+
+  async function makeGroup(): Promise<number> {
+    return (
+      await alice.agent
+        .post('/api/chats')
+        .send({ name: 'G', memberIds: [bob.user.id, carol.user.id] })
+    ).body.chat.id as number;
+  }
+
+  it('removes the leaver and emits chat:updated with removedMemberIds', async () => {
+    const group = await makeGroup();
+    const updates: ChatUpdatedEvent[] = [];
+    events.on('chat:updated', (e) => updates.push(e));
+
+    const res = await bob.agent.post(`/api/chats/${group}/leave`);
+    expect(res.status).toBe(204);
+
+    // Bob is out: the chat 404s for him but still exists for the others.
+    expect((await bob.agent.get(`/api/chats/${group}`)).status).toBe(404);
+    const forAlice = await summary(alice, group);
+    expect(new Set(forAlice.members.map((m) => m.id))).toEqual(
+      new Set([alice.user.id, carol.user.id]),
+    );
+
+    expect(updates).toHaveLength(1);
+    expect(updates[0]!.removedMemberIds).toEqual([bob.user.id]);
+    expect(new Set(updates[0]!.memberIds)).toEqual(
+      new Set([alice.user.id, carol.user.id]),
+    );
+    expect(updates[0]!.addedMemberIds).toEqual([]);
+  });
+
+  it('deletes the chat when the last member leaves', async () => {
+    const group = await makeGroup();
+    await bob.agent.post(`/api/chats/${group}/leave`);
+    await carol.agent.post(`/api/chats/${group}/leave`);
+
+    const updates: ChatUpdatedEvent[] = [];
+    events.on('chat:updated', (e) => updates.push(e));
+    const res = await alice.agent.post(`/api/chats/${group}/leave`);
+    expect(res.status).toBe(204);
+
+    expect(updates).toHaveLength(1);
+    expect(updates[0]!.memberIds).toEqual([]);
+    expect(updates[0]!.removedMemberIds).toEqual([alice.user.id]);
+
+    // Gone for good — even re-joining is impossible (the chat no longer exists).
+    expect((await alice.agent.get(`/api/chats/${group}`)).status).toBe(404);
+    const list = (await alice.agent.get('/api/chats')).body.chats as ChatSummaryDTO[];
+    expect(list.find((c) => c.id === group)).toBeUndefined();
+  });
+
+  it('rejects leaving a DM with 400', async () => {
+    const dm = (await alice.agent.post('/api/chats').send({ userId: bob.user.id })).body
+      .chat.id as number;
+    const res = await alice.agent.post(`/api/chats/${dm}/leave`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Cannot leave a DM');
+  });
+
+  it('hides the group from non-members (404)', async () => {
+    const group = (
+      await alice.agent.post('/api/chats').send({ name: 'G', memberIds: [bob.user.id] })
+    ).body.chat.id as number;
+    const res = await carol.agent.post(`/api/chats/${group}/leave`);
+    expect(res.status).toBe(404);
+  });
+
+  it('requires authentication', async () => {
+    const group = await makeGroup();
+    const res = await request(app).post(`/api/chats/${group}/leave`);
+    expect(res.status).toBe(401);
   });
 });
 

@@ -36,11 +36,16 @@ export interface ChatNewEvent {
   memberIds: number[];
 }
 
-/** A group's membership changed. `addedMemberIds` ⊆ `memberIds` (the new full list). */
+/**
+ * A group's membership changed. `addedMemberIds` ⊆ `memberIds` (the new full
+ * list); `removedMemberIds` are users who are NOT in `memberIds` any more (they
+ * left) — the socket relay tells their clients to drop the chat.
+ */
 export interface ChatUpdatedEvent {
   chat: ChatRow;
   memberIds: number[];
   addedMemberIds: number[];
+  removedMemberIds?: number[];
 }
 
 /**

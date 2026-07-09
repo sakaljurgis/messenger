@@ -197,10 +197,15 @@ export function initSocket(
     }
   });
 
-  events.on('chat:updated', ({ chat, memberIds }) => {
+  events.on('chat:updated', ({ chat, memberIds, removedMemberIds }) => {
     for (const id of memberIds) {
       const summary = getChatSummaryForUser(db, chat.id, id);
       if (summary) io.to(`user:${id}`).emit('chat:updated', summary);
+    }
+    // A removed member can't receive a summary (no membership to personalize
+    // against) — their clients get an explicit signal to drop the chat instead.
+    for (const id of removedMemberIds ?? []) {
+      io.to(`user:${id}`).emit('chat:removed', { chatId: chat.id });
     }
   });
 

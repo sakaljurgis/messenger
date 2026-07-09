@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="Messenger">
+  <defs>
+    <linearGradient id="bg" x1="48" y1="32" x2="472" y2="488" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4F46E5"/>
+      <stop offset="1" stop-color="#7C3AED"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.3" cy="0.24" r="0.9">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.16"/>
+      <stop offset="0.55" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Full-bleed squircle background (baked in so this file doubles as the favicon) -->
+  <rect x="0" y="0" width="512" height="512" rx="116" ry="116" fill="url(#bg)"/>
+  <rect x="0" y="0" width="512" height="512" rx="116" ry="116" fill="url(#glow)"/>
+
+  <!-- Conversation mark: two overlapping speech bubbles, centered on (256,256) -->
+  <g id="mark">
+    <!-- Back bubble (upper-right, translucent tint, tail up-right) -->
+    <g fill="#ffffff" opacity="0.42">
+      <rect x="254" y="133" width="156" height="120" rx="40" ry="40"/>
+      <polygon points="340,143 392,143 428,99"/>
+    </g>
+    <!-- Front bubble (lower-left, solid white, tail down-left) -->
+    <g fill="#ffffff">
+      <rect x="84" y="219" width="210" height="146" rx="48" ry="48"/>
+      <polygon points="134,355 194,355 96,413"/>
+    </g>
+  </g>
+</svg>

@@ -3,6 +3,7 @@ import { act, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import UsersPage from './UsersPage';
+import { AuthProvider } from '../lib/auth';
 import { __resetPresenceForTests, initPresence } from '../lib/presence';
 
 // Controllable socket so presence events can be driven synchronously.
@@ -51,6 +52,7 @@ function jsonResponse(status: number, body: unknown): Response {
   } as unknown as Response;
 }
 
+const me = { id: 1, email: 'me@example.com', displayName: 'Me', isBot: false };
 const users = [
   { id: 2, email: 'bob@example.com', displayName: 'Bob', isBot: false },
   { id: 3, email: 'echo@example.com', displayName: 'Echo Bot', isBot: true },
@@ -59,10 +61,12 @@ const users = [
 function renderUsersPage() {
   render(
     <MemoryRouter initialEntries={['/users']}>
-      <Routes>
-        <Route path="/users" element={<UsersPage />} />
-        <Route path="/chats/:id" element={<div>Conversation open</div>} />
-      </Routes>
+      <AuthProvider>
+        <Routes>
+          <Route path="/users" element={<UsersPage />} />
+          <Route path="/chats/:id" element={<div>Conversation open</div>} />
+        </Routes>
+      </AuthProvider>
     </MemoryRouter>,
   );
 }
@@ -83,6 +87,7 @@ describe('UsersPage', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
+        if (input.toString().endsWith('/api/auth/me')) return jsonResponse(200, { user: me });
         if (input.toString().endsWith('/api/users')) return jsonResponse(200, { users });
         throw new Error(`Unexpected fetch: ${input}`);
       }),
@@ -93,12 +98,15 @@ describe('UsersPage', () => {
     expect(await screen.findByText('Bob')).toBeInTheDocument();
     expect(screen.getByText('Echo Bot')).toBeInTheDocument();
     expect(screen.getByText('Bot')).toBeInTheDocument();
+    // My own entry is pinned above the directory.
+    expect(await screen.findByText('Notes to self')).toBeInTheDocument();
   });
 
   it('shows an online dot only for online users (bots never connect)', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
+        if (input.toString().endsWith('/api/auth/me')) return jsonResponse(200, { user: me });
         if (input.toString().endsWith('/api/users')) return jsonResponse(200, { users });
         throw new Error(`Unexpected fetch: ${input}`);
       }),
@@ -114,20 +122,25 @@ describe('UsersPage', () => {
     expect(screen.getAllByTestId('presence-dot')).toHaveLength(1);
   });
 
-  it('shows the empty state when there are no other users', async () => {
+  it('shows the empty state (plus my own notes row) when there are no other users', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => jsonResponse(200, { users: [] })),
+      vi.fn(async (input: RequestInfo | URL) => {
+        if (input.toString().endsWith('/api/auth/me')) return jsonResponse(200, { user: me });
+        return jsonResponse(200, { users: [] });
+      }),
     );
 
     renderUsersPage();
 
     expect(await screen.findByText(/no other users yet/i)).toBeInTheDocument();
+    expect(await screen.findByText('Notes to self')).toBeInTheDocument();
   });
 
   it('POSTs { userId } and navigates to the created chat when a row is tapped', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = input.toString();
+      if (url.endsWith('/api/auth/me')) return jsonResponse(200, { user: me });
       if (url.endsWith('/api/users')) return jsonResponse(200, { users });
       if (url.endsWith('/api/chats') && init?.method === 'POST') {
         return jsonResponse(201, { chat: { id: 42, type: 'dm', name: null, members: [], lastMessage: null, unreadCount: 0 } });
@@ -147,5 +160,29 @@ describe('UsersPage', () => {
     );
     expect(postCall).toBeDefined();
     expect(JSON.parse(postCall?.[1]?.body as string)).toEqual({ userId: 2 });
+  });
+
+  it('opens a self-DM from the notes-to-self row', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = input.toString();
+      if (url.endsWith('/api/auth/me')) return jsonResponse(200, { user: me });
+      if (url.endsWith('/api/users')) return jsonResponse(200, { users });
+      if (url.endsWith('/api/chats') && init?.method === 'POST') {
+        return jsonResponse(201, { chat: { id: 7, type: 'dm', name: null, members: [], lastMessage: null, unreadCount: 0 } });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderUsersPage();
+
+    await userEvent.click(await screen.findByText('Notes to self'));
+
+    expect(await screen.findByText('Conversation open')).toBeInTheDocument();
+
+    const postCall = fetchMock.mock.calls.find(
+      ([input, init]) => input.toString().endsWith('/api/chats') && init?.method === 'POST',
+    );
+    expect(JSON.parse(postCall?.[1]?.body as string)).toEqual({ userId: 1 });
   });
 });

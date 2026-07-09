@@ -125,6 +125,41 @@ describe('ChatListPage', () => {
     expect(screen.getByText('2')).toBeInTheDocument();
   });
 
+  it('marks group rows with a member-count badge; DM rows have none', async () => {
+    stubFetch(chats);
+    renderChatList();
+    await screen.findByText('Team');
+
+    const badges = screen.getAllByTestId('group-badge');
+    expect(badges).toHaveLength(1); // only the group row
+    expect(badges[0]).toHaveTextContent('3');
+    // Hovering the badge lists everyone in the group.
+    expect(badges[0]).toHaveAttribute('title', 'Me, Bob, Carol');
+  });
+
+  it('previews a message-less group with its member names', async () => {
+    stubFetch([
+      { id: 12, type: 'group', name: 'Quiet Group', members: [me, bob, carol], lastMessage: null, unreadCount: 0 },
+    ]);
+    renderChatList();
+
+    expect(await screen.findByText('Quiet Group')).toBeInTheDocument();
+    // Members (excluding me) instead of "No messages yet".
+    expect(screen.getByText('Bob, Carol')).toBeInTheDocument();
+    expect(screen.queryByText('No messages yet')).not.toBeInTheDocument();
+  });
+
+  it('drops a chat from the list when chat:removed arrives', async () => {
+    stubFetch(chats);
+    renderChatList();
+    await screen.findByText('Team');
+
+    await emitFromServer('chat:removed', { chatId: 11 });
+
+    expect(screen.queryByText('Team')).not.toBeInTheDocument();
+    expect(screen.getByText('Bob')).toBeInTheDocument(); // the DM stays
+  });
+
   it('shows the empty state with a CTA to People when there are no chats', async () => {
     stubFetch([]);
     renderChatList();
