@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import type { AttachmentDTO, ChatMemberDTO, ChatSummaryDTO, MessageDTO, UserDTO } from '@messenger/shared';
@@ -25,6 +25,9 @@ const socket = vi.hoisted(() => {
       for (const fn of [...(listeners[event] ?? [])]) fn(...args);
       return true;
     },
+    listenerCount(event: string) {
+      return (listeners[event] ?? []).length;
+    },
     connect() {
       s.connected = true;
       s.emit('connect');
@@ -43,6 +46,18 @@ vi.mock('../lib/socket', () => ({
   connectSocket: () => socket.connect(),
   disconnectSocket: () => socket.disconnect(),
 }));
+
+/**
+ * Emit a server→client event only after the page has actually subscribed —
+ * an event fired before the effect registers its listener is silently lost
+ * (the real app recovers via refetch-on-connect; a test cannot).
+ */
+async function emitFromServer(event: string, ...args: unknown[]) {
+  await waitFor(() => expect(socket.listenerCount(event)).toBeGreaterThan(0));
+  act(() => {
+    socket.emit(event, ...args);
+  });
+}
 
 function jsonResponse(status: number, body: unknown): Response {
   return {
@@ -214,9 +229,7 @@ describe('ChatPage', () => {
     await screen.findByText('Hi from Bob');
 
     // Server pushes a new message for chat 10 — no REST round-trip involved.
-    act(() => {
-      socket.emit('message:new', msg(7, bob, 'Live socket message'));
-    });
+    await emitFromServer('message:new', msg(7, bob, 'Live socket message'));
 
     expect(await screen.findByText('Live socket message')).toBeInTheDocument();
   });
@@ -348,11 +361,9 @@ describe('ChatPage', () => {
 
     await screen.findByText('before edit');
 
-    act(() => {
-      socket.emit('message:updated', {
-        ...msg(7, bob, 'after edit'),
-        editedAt: new Date().toISOString(),
-      });
+    await emitFromServer('message:updated', {
+      ...msg(7, bob, 'after edit'),
+      editedAt: new Date().toISOString(),
     });
 
     expect(await screen.findByText('after edit')).toBeInTheDocument();
@@ -366,9 +377,7 @@ describe('ChatPage', () => {
 
     await screen.findByText('doomed');
 
-    act(() => {
-      socket.emit('message:updated', { ...msg(7, bob, ''), content: '', isDeleted: true });
-    });
+    await emitFromServer('message:updated', { ...msg(7, bob, ''), content: '', isDeleted: true });
 
     expect(await screen.findByText('Message deleted')).toBeInTheDocument();
     expect(screen.queryByText('doomed')).not.toBeInTheDocument();
@@ -413,10 +422,63 @@ describe('ChatPage', () => {
     expect(screen.queryByTitle('Bob')).not.toBeInTheDocument();
 
     // Server pushes Bob's advanced read marker — the avatar appears without a refetch.
-    act(() => {
-      socket.emit('read:updated', { chatId: 10, userId: bob.id, lastReadMessageId: 2 });
-    });
+    await emitFromServer('read:updated', { chatId: 10, userId: bob.id, lastReadMessageId: 2 });
 
     expect(await screen.findByTitle('Bob')).toBeInTheDocument();
+  });
+
+  it('shows a typing indicator on a socket typing event and hides it after expiry', async () => {
+    stubFetch({ messages: [msg(1, bob, 'Hi from Bob')] });
+    renderChatPage();
+    await screen.findByText('Hi from Bob');
+
+    // Fake timers fire the 1s prune interval; an explicit Date.now spy (installed
+    // after useFakeTimers so it governs the clock the prune reads) makes the 4s
+    // expiry deterministic.
+    await waitFor(() => expect(socket.listenerCount('typing')).toBeGreaterThan(0));
+    let now = 100_000;
+    vi.useFakeTimers();
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      act(() => {
+        socket.emit('typing', { chatId: 10, userId: bob.id }); // expiresAt = now + 4000
+      });
+      expect(screen.getByText('Bob is typing…')).toBeInTheDocument();
+
+      now += 5000; // past the 4s expiry
+      act(() => {
+        vi.advanceTimersByTime(5000); // let the 1s sweep run
+      });
+      expect(screen.queryByText('Bob is typing…')).not.toBeInTheDocument();
+    } finally {
+      nowSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('ignores my own id in typing events', async () => {
+    stubFetch({ messages: [msg(1, bob, 'Hi from Bob')] });
+    renderChatPage();
+    await screen.findByText('Hi from Bob');
+
+    await emitFromServer('typing', { chatId: 10, userId: me.id });
+    expect(screen.queryByText(/is typing…/)).not.toBeInTheDocument();
+  });
+
+  it('labels two simultaneous typers together', async () => {
+    const carol: ChatMemberDTO = {
+      id: 3, email: 'carol@example.com', displayName: 'Carol', isBot: false, lastReadMessageId: 0,
+    };
+    const group: ChatSummaryDTO = {
+      id: 10, type: 'group', name: 'Team', members: [me, bob, carol], lastMessage: null, unreadCount: 0,
+    };
+    stubFetch({ messages: [msg(1, bob, 'hi team')], chat: group });
+    renderChatPage();
+    await screen.findByText('hi team');
+
+    await emitFromServer('typing', { chatId: 10, userId: bob.id });
+    await emitFromServer('typing', { chatId: 10, userId: carol.id });
+
+    expect(screen.getByText('Bob and Carol are typing…')).toBeInTheDocument();
   });
 });

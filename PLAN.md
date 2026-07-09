@@ -163,9 +163,10 @@ cloudflared.
       subscribe flow, push fan-out with mention-aware titles, notification click.
 - [x] **6 — Bots**: bot registration, webhook delivery (with retry/timeout),
       inbound bot message endpoint, a tiny example echo-bot script.
-- [ ] **7 — Polish (stretch)**: typing indicators, online presence dots,
-      docker-compose with Caddy, avatar colors/initials, smoke tests
-      (vitest + supertest) for auth and message fan-out.
+- [x] **7 — Polish (stretch)**: typing indicators, online presence dots.
+      (Caddy HTTPS dropped — production runs behind the user's own TLS
+      reverse proxy; compose is dev/test only. Avatars and test suites
+      landed in earlier phases.)
 
 Each phase ends in a working, demoable state.
 

@@ -2,7 +2,8 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { ChatSummaryDTO } from '@messenger/shared';
 import { useAuth } from '../lib/auth';
-import { chatTitle, formatListTime, otherMember, useChats } from '../lib/chats';
+import { chatTitle, formatListTime, otherMember, useChats, useTypingChats } from '../lib/chats';
+import { useOnlineUsers } from '../lib/presence';
 import { attachmentPreviewText } from '../lib/attachments';
 import { enablePush, pushSupported } from '../lib/push';
 import Avatar from '../components/Avatar';
@@ -84,11 +85,27 @@ function previewText(chat: ChatSummaryDTO, meId: number): string {
   return `${prefix}${body}`;
 }
 
-function ChatRow({ chat, meId }: { chat: ChatSummaryDTO; meId: number }) {
+function ChatRow({
+  chat,
+  meId,
+  online,
+  typing,
+}: {
+  chat: ChatSummaryDTO;
+  meId: number;
+  online: boolean;
+  typing: boolean;
+}) {
   const title = chatTitle(chat, meId);
   const unread = chat.unreadCount > 0;
   const other = otherMember(chat, meId);
   const avatarId = chat.type === 'group' ? chat.id : (other?.id ?? chat.id);
+
+  // Preview line: an italic blue "typing…" while someone types, else the last
+  // message (italic for tombstones, bolder while unread).
+  const previewClass = typing
+    ? 'italic text-[#0084ff]'
+    : `${chat.lastMessage?.isDeleted ? 'italic ' : ''}${unread ? 'font-medium text-gray-700' : 'text-gray-500'}`;
 
   return (
     <li>
@@ -96,7 +113,7 @@ function ChatRow({ chat, meId }: { chat: ChatSummaryDTO; meId: number }) {
         to={`/chats/${chat.id}`}
         className="flex items-center gap-3 rounded-xl px-2 py-2 transition-colors hover:bg-gray-50"
       >
-        <Avatar name={title} id={avatarId} size="lg" />
+        <Avatar name={title} id={avatarId} size="lg" online={online} />
         <div className="min-w-0 flex-1">
           <div className="flex items-baseline justify-between gap-2">
             <span
@@ -111,10 +128,8 @@ function ChatRow({ chat, meId }: { chat: ChatSummaryDTO; meId: number }) {
             )}
           </div>
           <div className="flex items-center justify-between gap-2">
-            <span
-              className={`truncate text-sm ${chat.lastMessage?.isDeleted ? 'italic ' : ''}${unread ? 'font-medium text-gray-700' : 'text-gray-500'}`}
-            >
-              {previewText(chat, meId)}
+            <span className={`truncate text-sm ${previewClass}`}>
+              {typing ? 'typing…' : previewText(chat, meId)}
             </span>
             {unread && (
               <span className="flex h-5 min-w-5 flex-shrink-0 items-center justify-center rounded-full bg-[#0084ff] px-1.5 text-xs font-semibold text-white">
@@ -132,6 +147,15 @@ export default function ChatListPage() {
   const { user } = useAuth();
   const { chats, loading, error } = useChats();
   const meId = user?.id ?? -1;
+  const onlineIds = useOnlineUsers();
+  const typingChats = useTypingChats(meId);
+
+  // A DM row shows the online dot only when the *other* member is online.
+  const isDmOtherOnline = (chat: ChatSummaryDTO): boolean => {
+    if (chat.type !== 'dm') return false;
+    const other = otherMember(chat, meId);
+    return other ? onlineIds.has(other.id) : false;
+  };
 
   return (
     <div className="p-2">
@@ -167,7 +191,13 @@ export default function ChatListPage() {
       ) : (
         <ul className="flex flex-col">
           {chats.map((chat) => (
-            <ChatRow key={chat.id} chat={chat} meId={meId} />
+            <ChatRow
+              key={chat.id}
+              chat={chat}
+              meId={meId}
+              online={isDmOtherOnline(chat)}
+              typing={typingChats.has(chat.id)}
+            />
           ))}
         </ul>
       )}

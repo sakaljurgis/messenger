@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import type { ChatSummaryDTO, UserDTO } from '@messenger/shared';
 import { apiGet, apiPost } from '../lib/api';
+import { useOnlineUsers } from '../lib/presence';
 import Avatar from '../components/Avatar';
 
 export default function UsersPage() {
@@ -9,6 +10,7 @@ export default function UsersPage() {
   const [error, setError] = useState<string | null>(null);
   const [openingId, setOpeningId] = useState<number | null>(null);
   const navigate = useNavigate();
+  const onlineIds = useOnlineUsers();
 
   useEffect(() => {
     let cancelled = false;
@@ -59,7 +61,7 @@ export default function UsersPage() {
                 disabled={openingId !== null}
                 className="flex w-full items-center gap-3 rounded-xl px-2 py-2 text-left transition-colors hover:bg-gray-50 disabled:opacity-60"
               >
-                <Avatar name={user.displayName} id={user.id} />
+                <Avatar name={user.displayName} id={user.id} online={onlineIds.has(user.id)} />
                 <span className="font-medium text-gray-900">{user.displayName}</span>
                 {user.isBot && (
                   <span className="rounded-full bg-gray-200 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-gray-600">

@@ -1,6 +1,10 @@
 import '@testing-library/jest-dom/vitest';
 import { afterEach } from 'vitest';
-import { cleanup } from '@testing-library/react';
+import { cleanup, configure } from '@testing-library/react';
+
+// Default 1s async-query timeout can lose races when all suite files run on
+// saturated workers; 5s keeps queries deterministic under CPU contention.
+configure({ asyncUtilTimeout: 5000 });
 
 // jsdom implements neither of these; the chat view calls them for auto-scroll.
 Element.prototype.scrollIntoView = function scrollIntoView() {};

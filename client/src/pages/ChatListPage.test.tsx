@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import type { AttachmentDTO, ChatMemberDTO, ChatSummaryDTO, MessageDTO, UserDTO } from '@messenger/shared';
@@ -24,6 +24,9 @@ const socket = vi.hoisted(() => {
       for (const fn of [...(listeners[event] ?? [])]) fn(...args);
       return true;
     },
+    listenerCount(event: string) {
+      return (listeners[event] ?? []).length;
+    },
     connect() {
       s.connected = true;
       s.emit('connect');
@@ -42,6 +45,18 @@ vi.mock('../lib/socket', () => ({
   connectSocket: () => socket.connect(),
   disconnectSocket: () => socket.disconnect(),
 }));
+
+/**
+ * Emit a server→client event only after the page has actually subscribed —
+ * an event fired before the effect registers its listener is silently lost
+ * (the real app recovers via refetch-on-connect; a test cannot).
+ */
+async function emitFromServer(event: string, ...args: unknown[]) {
+  await waitFor(() => expect(socket.listenerCount(event)).toBeGreaterThan(0));
+  act(() => {
+    socket.emit(event, ...args);
+  });
+}
 
 function jsonResponse(status: number, body: unknown): Response {
   return {
@@ -142,9 +157,7 @@ describe('ChatListPage', () => {
       lastMessage: null,
       unreadCount: 0,
     };
-    act(() => {
-      socket.emit('chat:new', newGroup);
-    });
+    await emitFromServer('chat:new', newGroup);
 
     expect(await screen.findByText('Fresh Group')).toBeInTheDocument();
   });
@@ -164,6 +177,35 @@ describe('ChatListPage', () => {
     expect(theirs.className).toContain('italic');
     // "You:" prefix logic still applies for my own deleted message.
     expect(screen.getByText('You: Message deleted')).toBeInTheDocument();
+  });
+
+  it("shows an italic blue 'typing…' preview while a chat has a typer, reverting on message:new", async () => {
+    stubFetch(chats);
+    renderChatList();
+
+    // The DM (chat 10) initially previews its last message.
+    await screen.findByText('Hey there');
+
+    // A typing signal for chat 10 swaps the preview for 'typing…'.
+    await emitFromServer('typing', { chatId: 10, userId: bob.id });
+    const typing = await screen.findByText('typing…');
+    expect(typing.className).toContain('italic');
+    expect(typing.className).toContain('text-[#0084ff]');
+    expect(screen.queryByText('Hey there')).not.toBeInTheDocument();
+
+    // A message landing in chat 10 means the typed message arrived — revert at once.
+    await emitFromServer('message:new', { ...msg(7, bob, 'Hey there'), chatId: 10 });
+    expect(await screen.findByText('Hey there')).toBeInTheDocument();
+    expect(screen.queryByText('typing…')).not.toBeInTheDocument();
+  });
+
+  it('ignores my own typing signal for the preview', async () => {
+    stubFetch(chats);
+    renderChatList();
+    await screen.findByText('Hey there');
+
+    await emitFromServer('typing', { chatId: 10, userId: me.id });
+    expect(screen.queryByText('typing…')).not.toBeInTheDocument();
   });
 
   it('previews empty-content messages with attachments', async () => {

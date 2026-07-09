@@ -130,6 +130,12 @@ export interface ServerToClientEvents {
   'chat:updated': (chat: ChatSummaryDTO) => void;
   /** A member's read marker advanced in a chat (never fires on a no-op/backwards read). */
   'read:updated': (data: { chatId: number; userId: number; lastReadMessageId: number }) => void;
+  /** A member is typing in a chat — a transient signal relayed to the chat's other members. */
+  'typing': (data: { chatId: number; userId: number }) => void;
+  /** A user's presence flipped online/offline (offline is debounced past a short grace window). */
+  'presence': (data: { userId: number; online: boolean }) => void;
+  /** One-shot snapshot of who is currently online, pushed to each socket on connect. */
+  'presence:state': (onlineUserIds: number[]) => void;
 }
 
 export interface ClientToServerEvents {

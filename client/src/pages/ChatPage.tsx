@@ -8,11 +8,14 @@ import {
   formatDaySeparator,
   formatMessageTime,
   markRead,
+  otherMember,
   readPositions,
   sameCalendarDay,
   useChat,
+  useChatTyping,
   useMessages,
 } from '../lib/chats';
+import { useOnlineUsers } from '../lib/presence';
 import { attachmentUrl, formatBytes } from '../lib/attachments';
 import Avatar from '../components/Avatar';
 import Composer from '../components/Composer';
@@ -420,6 +423,41 @@ function MessageRow({
   );
 }
 
+/** "Ana is typing…", "Ana and Ben are typing…", "Ana, Ben and Cara are typing…". */
+function typingLabel(names: string[]): string {
+  if (names.length === 1) return `${names[0]} is typing…`;
+  if (names.length === 2) return `${names[0]} and ${names[1]} are typing…`;
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]} are typing…`;
+}
+
+/**
+ * Messenger-style typing bubble: a small gray pill with three staggered bouncing
+ * dots and a tiny label. Rendered below the last message, inside the scroll area,
+ * so it never yanks the viewport around. Nothing shows when no one is typing.
+ */
+function TypingIndicator({ names }: { names: string[] }) {
+  if (names.length === 0) return null;
+  return (
+    <div className="mt-2 flex justify-start px-3" aria-live="polite">
+      <div className="flex items-end gap-2">
+        <div className="w-8 flex-shrink-0" />
+        <div className="flex flex-col items-start gap-0.5">
+          <div className="flex items-center gap-1 rounded-2xl bg-gray-200 px-3.5 py-3">
+            {[0, 1, 2].map((i) => (
+              <span
+                key={i}
+                className="h-2 w-2 animate-bounce rounded-full bg-gray-400"
+                style={{ animationDelay: `${i * 0.15}s` }}
+              />
+            ))}
+          </div>
+          <span className="ml-1 text-[10px] text-gray-400">{typingLabel(names)}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function ChatPage() {
   const params = useParams();
   const chatId = Number(params.id);
@@ -442,6 +480,16 @@ export default function ChatPage() {
   const title = chat ? chatTitle(chat, meId) : 'Chat';
   const members = chat?.members ?? [];
   const rows = buildRows(messages, meId, isGroup);
+
+  // Presence + typing. The header dot is DM-only (the other member); the typing
+  // indicator names live typers (mapped to member display names).
+  const onlineIds = useOnlineUsers();
+  const dmOther = chat && !isGroup ? otherMember(chat, meId) : undefined;
+  const otherOnline = dmOther ? onlineIds.has(dmOther.id) : false;
+  const typingIds = useChatTyping(chatId, meId);
+  const typingNames = [...typingIds]
+    .map((id) => members.find((m) => m.id === id)?.displayName)
+    .filter((name): name is string => Boolean(name));
   // Anchor message id -> members whose read position lands there. Recomputed
   // from live state (messages + chat.members, which useChat patches in place
   // on `read:updated`), so receipts move on their own without extra plumbing.
@@ -519,7 +567,13 @@ export default function ChatPage() {
         >
           <BackIcon />
         </Link>
-        {chat && <Avatar name={title} id={isGroup ? chat.id : (chat.members.find((m) => m.id !== meId)?.id ?? chat.id)} />}
+        {chat && (
+          <Avatar
+            name={title}
+            id={isGroup ? chat.id : (dmOther?.id ?? chat.id)}
+            online={otherOnline}
+          />
+        )}
         <div className="min-w-0">
           <h1 className="truncate font-semibold text-gray-900">{title}</h1>
           {isGroup && chat && (
@@ -569,6 +623,7 @@ export default function ChatPage() {
             </div>
           ))
         )}
+        <TypingIndicator names={typingNames} />
         <div ref={bottomRef} />
       </div>
 

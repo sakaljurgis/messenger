@@ -9,6 +9,7 @@ import {
 } from 'react';
 import type { AttachmentDTO, MessageDTO, UserDTO } from '@messenger/shared';
 import Avatar from './Avatar';
+import { getSocket } from '../lib/socket';
 import { compressImage, shouldCompress, uploadAttachment } from '../lib/attachments';
 import {
   extractMentions,
@@ -43,6 +44,9 @@ interface MentionState {
   candidates: UserDTO[];
   highlight: number;
 }
+
+/** Emit the "typing" signal at most once per this window while the user types. */
+const TYPING_THROTTLE_MS = 2000;
 
 type PendingStatus = 'uploading' | 'done' | 'error';
 
@@ -198,6 +202,8 @@ export default function Composer({
   // Mirror of `pending` for unmount cleanup (revoke object URLs).
   const pendingRef = useRef<PendingAttachment[]>([]);
   pendingRef.current = pending;
+  // Throttle for the outgoing "typing" signal — at most one emit per window.
+  const lastTypingEmit = useRef(0);
 
   const isEditing = editing !== null;
   const editingId = editing?.id ?? null;
@@ -297,6 +303,15 @@ export default function Composer({
     const reset: PendingAttachment = { ...target, status: 'uploading', progress: 0 };
     setPending((prev) => prev.map((p) => (p.localId === localId ? reset : p)));
     startUpload(reset);
+  }
+
+  /** Signal that I'm typing in this chat — throttled, and only for non-empty text. */
+  function emitTyping(value: string) {
+    if (value.trim().length === 0) return;
+    const now = Date.now();
+    if (now - lastTypingEmit.current < TYPING_THROTTLE_MS) return;
+    lastTypingEmit.current = now;
+    getSocket().emit('typing', chatId);
   }
 
   /** Recompute the autocomplete from the input's current value + caret. */
@@ -505,6 +520,7 @@ export default function Composer({
           onChange={(e) => {
             setText(e.target.value);
             refreshMention(e.target.value, e.target.selectionStart ?? e.target.value.length);
+            emitTyping(e.target.value);
           }}
           onKeyDown={handleKeyDown}
           onSelect={(e) => {

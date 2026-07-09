@@ -509,3 +509,106 @@ export function useMessages(chatId: number): UseMessagesResult {
 export function markRead(chatId: number, messageId: number): Promise<void> {
   return apiPost<void>(`/api/chats/${chatId}/read`, { messageId });
 }
+
+// ---------------------------------------------------------------------------
+// Typing indicators — transient, socket-driven, self-expiring.
+// ---------------------------------------------------------------------------
+
+/** A typing signal is considered stale this long after the last 'typing' event. */
+export const TYPING_EXPIRY_MS = 4000;
+
+/**
+ * Drop entries whose expiry has passed. Returns the same Map reference when
+ * nothing expired so callers can bail out of a state update.
+ */
+function pruneExpired(map: Map<number, number>, now: number): Map<number, number> {
+  let changed = false;
+  const next = new Map(map);
+  for (const [key, expiresAt] of next) {
+    if (expiresAt <= now) {
+      next.delete(key);
+      changed = true;
+    }
+  }
+  return changed ? next : map;
+}
+
+/**
+ * Core self-pruning typing store, keyed on whatever `onTyping`/`clearKeyOf`
+ * return. A 'typing' event (re)arms a key for {@link TYPING_EXPIRY_MS}; a
+ * 'message:new' clears its key immediately (the typed message landed); a change
+ * to `resetToken` wipes everything. While anything is live a 1s interval sweeps
+ * expired entries so the indicator disappears on its own. Returns the live keys.
+ */
+function useExpiringTyping(
+  onTyping: (data: { chatId: number; userId: number }) => number | null,
+  clearKeyOf: (message: MessageDTO) => number | null,
+  resetToken = 0,
+): Set<number> {
+  const [entries, setEntries] = useState<Map<number, number>>(new Map());
+
+  // Reset on token change (render-phase, per React's "adjust state on prop
+  // change" pattern) so a stale typer never leaks across the change.
+  const resetRef = useRef(resetToken);
+  if (resetRef.current !== resetToken) {
+    resetRef.current = resetToken;
+    if (entries.size > 0) setEntries(new Map());
+  }
+
+  useSocketEvent('typing', (data) => {
+    const key = onTyping(data);
+    if (key === null) return;
+    setEntries((prev) => new Map(prev).set(key, Date.now() + TYPING_EXPIRY_MS));
+  });
+
+  useSocketEvent('message:new', (message) => {
+    const key = clearKeyOf(message);
+    if (key === null) return;
+    setEntries((prev) => {
+      if (!prev.has(key)) return prev;
+      const next = new Map(prev);
+      next.delete(key);
+      return next;
+    });
+  });
+
+  useEffect(() => {
+    if (entries.size === 0) return;
+    const interval = setInterval(() => {
+      setEntries((prev) => pruneExpired(prev, Date.now()));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [entries.size]);
+
+  const now = Date.now();
+  const live = new Set<number>();
+  for (const [key, expiresAt] of entries) {
+    if (expiresAt > now) live.add(key);
+  }
+  return live;
+}
+
+/**
+ * User ids currently typing in `chatId` (excluding me), for the in-chat
+ * indicator. Entries expire 4s after the last 'typing' event and clear the
+ * instant that user's message arrives; switching chats wipes the set.
+ */
+export function useChatTyping(chatId: number, meId: number): Set<number> {
+  return useExpiringTyping(
+    (data) => (data.chatId === chatId && data.userId !== meId ? data.userId : null),
+    (message) => (message.chatId === chatId ? message.sender.id : null),
+    chatId,
+  );
+}
+
+/**
+ * Chat ids that currently have someone (other than me) typing, for the chat-list
+ * 'typing…' preview. Each entry expires 4s after the last 'typing' event and
+ * clears the instant a message lands in that chat.
+ */
+export function useTypingChats(meId: number): Set<number> {
+  return useExpiringTyping(
+    (data) => (data.userId !== meId ? data.chatId : null),
+    (message) => message.chatId,
+  );
+}

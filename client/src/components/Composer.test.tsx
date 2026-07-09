@@ -16,6 +16,21 @@ vi.mock('../lib/attachments', async (importActual) => {
   };
 });
 
+// Socket stand-in so the throttled "typing" emit can be observed without a real
+// connection. Only `emit` is exercised by the composer.
+const socketMock = vi.hoisted(() => ({
+  emit: vi.fn(),
+  on: vi.fn(),
+  off: vi.fn(),
+  connected: false,
+}));
+
+vi.mock('../lib/socket', () => ({
+  getSocket: () => socketMock,
+  connectSocket: () => {},
+  disconnectSocket: () => {},
+}));
+
 const me: UserDTO = { id: 1, email: 'me@example.com', displayName: 'Me', isBot: false };
 const alice: UserDTO = { id: 2, email: 'alice@example.com', displayName: 'Alice', isBot: false };
 
@@ -68,6 +83,47 @@ describe('Composer @mentions', () => {
     await userEvent.type(screen.getByPlaceholderText('Aa'), '@');
     expect(screen.getByRole('option', { name: /alice/i })).toBeInTheDocument();
     expect(screen.queryByRole('option', { name: /^me$/i })).not.toBeInTheDocument();
+  });
+});
+
+describe('Composer typing signal', () => {
+  beforeEach(() => {
+    // Prior describes' keystrokes also emit 'typing'; start each case from zero.
+    socketMock.emit.mockClear();
+  });
+
+  it('emits typing at most once per 2s for rapid keystrokes', () => {
+    // Drive the throttle clock directly so the 2s window is deterministic.
+    let now = 10_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      render(<Composer onSend={vi.fn()} members={[me, alice]} meId={me.id} chatId={10} />);
+      const input = screen.getByPlaceholderText('Aa');
+
+      // Three keystrokes inside the 2s window → exactly one emit.
+      fireEvent.change(input, { target: { value: 'h' } });
+      fireEvent.change(input, { target: { value: 'he' } });
+      fireEvent.change(input, { target: { value: 'hel' } });
+      expect(socketMock.emit).toHaveBeenCalledTimes(1);
+      expect(socketMock.emit).toHaveBeenCalledWith('typing', 10);
+
+      // Past the window, the next keystroke emits again.
+      now += 2001;
+      fireEvent.change(input, { target: { value: 'hell' } });
+      expect(socketMock.emit).toHaveBeenCalledTimes(2);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('does not emit typing for empty input', () => {
+    render(<Composer onSend={vi.fn()} members={[me]} meId={me.id} chatId={10} />);
+    const input = screen.getByPlaceholderText('Aa');
+
+    fireEvent.change(input, { target: { value: 'x' } }); // one non-empty emit
+    fireEvent.change(input, { target: { value: '' } }); // cleared → no emit
+    expect(socketMock.emit).toHaveBeenCalledTimes(1);
+    expect(socketMock.emit).toHaveBeenCalledWith('typing', 10);
   });
 });
 

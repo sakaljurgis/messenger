@@ -10,6 +10,7 @@ import {
 import type { AuthResponse, UserDTO } from '@messenger/shared';
 import { apiGet, apiPost } from './api';
 import { connectSocket, disconnectSocket } from './socket';
+import { initPresence } from './presence';
 
 interface AuthContextValue {
   user: UserDTO | null;
@@ -51,6 +52,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // the handshake; the cleanup disconnects on logout (user -> null).
   useEffect(() => {
     if (!user) return;
+    // Wire the presence store's socket listeners (idempotent) before opening the
+    // connection, so the server's on-connect snapshot is never missed.
+    initPresence();
     connectSocket();
     return () => {
       disconnectSocket();

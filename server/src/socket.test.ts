@@ -18,6 +18,9 @@ import { initSocket, type SocketHandle } from './socket.js';
 type App = ReturnType<typeof createApp>;
 type ClientSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 
+/** Short offline-presence grace so the debounce resolves within the test (prod default is 5s). */
+const GRACE_MS = 200;
+
 interface Harness {
   app: App;
   server: http.Server;
@@ -25,13 +28,17 @@ interface Harness {
   handle: SocketHandle;
 }
 
-/** Boot a real HTTP server (app + Socket.IO on the SAME db/events) on an ephemeral port. */
-async function startServer(): Promise<Harness> {
+/**
+ * Boot a real HTTP server (app + Socket.IO on the SAME db/events) on an ephemeral
+ * port. `presenceGraceMs` is shortened in presence tests so the offline debounce
+ * resolves within the test rather than the 5s production default.
+ */
+async function startServer(presenceGraceMs?: number): Promise<Harness> {
   const db = createDb(':memory:');
   const events = createChatEvents();
   const app = createApp(db, events);
   const server = http.createServer(app);
-  const handle = initSocket(server, db, events);
+  const handle = initSocket(server, db, events, presenceGraceMs);
   await new Promise<void>((resolve) => server.listen(0, resolve));
   const port = (server.address() as AddressInfo).port;
   return { app, server, port, handle };
@@ -103,7 +110,7 @@ describe('Socket.IO real-time', () => {
   }
 
   beforeEach(async () => {
-    ctx = await startServer();
+    ctx = await startServer(GRACE_MS);
   });
 
   afterEach(async () => {
@@ -111,6 +118,9 @@ describe('Socket.IO real-time', () => {
     openSockets.length = 0;
     // Closing the io server also closes the underlying HTTP server.
     await new Promise<void>((resolve) => ctx.handle.io.close(() => resolve()));
+    // Cancel any offline-presence timers parked by the forced disconnects above
+    // so no unref'd timer lingers past the test.
+    ctx.handle.clearPresenceTimers();
   });
 
   it('rejects a connection with no cookie', async () => {
@@ -221,5 +231,137 @@ describe('Socket.IO real-time', () => {
     socket.close();
     await waitUntil(() => !ctx.handle.isUserConnected(alice.user.id));
     expect(ctx.handle.isUserConnected(alice.user.id)).toBe(false);
+  });
+
+  it('relays typing to the other member of a chat but not back to the sender', async () => {
+    const alice = await register(ctx.app, 'alice@example.com', 'Alice');
+    const bob = await register(ctx.app, 'bob@example.com', 'Bob');
+
+    const dm = await request(ctx.app)
+      .post('/api/chats')
+      .set('Cookie', alice.cookie)
+      .send({ userId: bob.user.id });
+    const chatId = dm.body.chat.id as number;
+
+    const aliceSocket = connect(alice.cookie);
+    const bobSocket = connect(bob.cookie);
+    await Promise.all([waitConnect(aliceSocket), waitConnect(bobSocket)]);
+
+    // The sender must NOT receive an echo of their own typing signal.
+    let aliceGotTyping = false;
+    aliceSocket.on('typing', () => {
+      aliceGotTyping = true;
+    });
+
+    const bobReceived = waitFor<{ chatId: number; userId: number }>(bobSocket, 'typing');
+    aliceSocket.emit('typing', chatId);
+
+    expect(await bobReceived).toEqual({ chatId, userId: alice.user.id });
+    expect(aliceGotTyping).toBe(false);
+  });
+
+  it('ignores a typing signal for a chat the sender is not a member of', async () => {
+    const alice = await register(ctx.app, 'alice@example.com', 'Alice');
+    const bob = await register(ctx.app, 'bob@example.com', 'Bob');
+    const carol = await register(ctx.app, 'carol@example.com', 'Carol');
+
+    // A DM between Bob and Carol; Alice is deliberately NOT a member.
+    const dm = await request(ctx.app)
+      .post('/api/chats')
+      .set('Cookie', bob.cookie)
+      .send({ userId: carol.user.id });
+    const chatId = dm.body.chat.id as number;
+
+    const aliceSocket = connect(alice.cookie);
+    const bobSocket = connect(bob.cookie);
+    await Promise.all([waitConnect(aliceSocket), waitConnect(bobSocket)]);
+
+    let bobGotTyping = false;
+    bobSocket.on('typing', () => {
+      bobGotTyping = true;
+    });
+
+    aliceSocket.emit('typing', chatId);
+    // Bounded negative wait: a non-member's typing must produce nothing.
+    await new Promise((r) => setTimeout(r, 150));
+    expect(bobGotTyping).toBe(false);
+  });
+
+  it('sends a presence:state snapshot that lists an already-connected user', async () => {
+    const alice = await register(ctx.app, 'alice@example.com', 'Alice');
+    const bob = await register(ctx.app, 'bob@example.com', 'Bob');
+
+    const aliceSocket = connect(alice.cookie);
+    await waitConnect(aliceSocket);
+    await waitUntil(() => ctx.handle.isUserConnected(alice.user.id));
+
+    // Bob's snapshot (pushed on connect) should already include Alice.
+    const bobSocket = connect(bob.cookie);
+    const snapshot = waitFor<number[]>(bobSocket, 'presence:state');
+    await waitConnect(bobSocket);
+
+    expect(await snapshot).toContain(alice.user.id);
+  });
+
+  it('broadcasts presence online to connected users when a user first connects', async () => {
+    const alice = await register(ctx.app, 'alice@example.com', 'Alice');
+    const bob = await register(ctx.app, 'bob@example.com', 'Bob');
+
+    const bobSocket = connect(bob.cookie);
+    await waitConnect(bobSocket);
+
+    // Bob is already online; Alice connecting fires a fresh online broadcast.
+    const aliceOnline = waitFor<{ userId: number; online: boolean }>(bobSocket, 'presence');
+    const aliceSocket = connect(alice.cookie);
+    await waitConnect(aliceSocket);
+
+    expect(await aliceOnline).toEqual({ userId: alice.user.id, online: true });
+  });
+
+  it('broadcasts presence offline after the last socket disconnects past the grace window', async () => {
+    const alice = await register(ctx.app, 'alice@example.com', 'Alice');
+    const bob = await register(ctx.app, 'bob@example.com', 'Bob');
+
+    const bobSocket = connect(bob.cookie);
+    await waitConnect(bobSocket);
+
+    // Sync on Alice's online event first so the next 'presence' is unambiguously offline.
+    const aliceOnline = waitFor<{ userId: number; online: boolean }>(bobSocket, 'presence');
+    const aliceSocket = connect(alice.cookie);
+    await waitConnect(aliceSocket);
+    expect(await aliceOnline).toEqual({ userId: alice.user.id, online: true });
+
+    const aliceOffline = waitFor<{ userId: number; online: boolean }>(bobSocket, 'presence');
+    aliceSocket.close();
+    expect(await aliceOffline).toEqual({ userId: alice.user.id, online: false });
+  });
+
+  it('does not broadcast offline when a user reconnects within the grace window', async () => {
+    const alice = await register(ctx.app, 'alice@example.com', 'Alice');
+    const bob = await register(ctx.app, 'bob@example.com', 'Bob');
+
+    const bobSocket = connect(bob.cookie);
+    await waitConnect(bobSocket);
+
+    // Get Alice online (and observed by Bob) before we start watching for flicker.
+    const aliceOnline = waitFor<{ userId: number; online: boolean }>(bobSocket, 'presence');
+    const aliceSocket = connect(alice.cookie);
+    await waitConnect(aliceSocket);
+    await aliceOnline;
+
+    // Record every subsequent presence event about Alice.
+    const events: Array<{ userId: number; online: boolean }> = [];
+    bobSocket.on('presence', (p) => {
+      if (p.userId === alice.user.id) events.push(p);
+    });
+
+    // Drop and immediately reconnect within the grace window (a page reload).
+    aliceSocket.close();
+    const aliceReconnect = connect(alice.cookie);
+    await waitConnect(aliceReconnect);
+
+    // Wait past the grace window: no offline (nor a spurious re-online) should fire.
+    await new Promise((r) => setTimeout(r, GRACE_MS + 150));
+    expect(events).toEqual([]);
   });
 });

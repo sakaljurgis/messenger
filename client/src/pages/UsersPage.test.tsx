@@ -1,8 +1,47 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { act, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import UsersPage from './UsersPage';
+import { __resetPresenceForTests, initPresence } from '../lib/presence';
+
+// Controllable socket so presence events can be driven synchronously.
+const socket = vi.hoisted(() => {
+  const listeners: Record<string, Array<(...a: unknown[]) => void>> = {};
+  const s = {
+    connected: false,
+    on(event: string, fn: (...a: unknown[]) => void) {
+      (listeners[event] ??= []).push(fn);
+      return s;
+    },
+    off(event: string, fn: (...a: unknown[]) => void) {
+      listeners[event] = (listeners[event] ?? []).filter((f) => f !== fn);
+      return s;
+    },
+    emit(event: string, ...args: unknown[]) {
+      for (const fn of [...(listeners[event] ?? [])]) fn(...args);
+      return true;
+    },
+    connect() {
+      s.connected = true;
+      return s;
+    },
+    disconnect() {
+      s.connected = false;
+      return s;
+    },
+    clear() {
+      for (const key of Object.keys(listeners)) delete listeners[key];
+    },
+  };
+  return s;
+});
+
+vi.mock('../lib/socket', () => ({
+  getSocket: () => socket,
+  connectSocket: () => socket.connect(),
+  disconnectSocket: () => socket.disconnect(),
+}));
 
 function jsonResponse(status: number, body: unknown): Response {
   return {
@@ -29,8 +68,15 @@ function renderUsersPage() {
 }
 
 describe('UsersPage', () => {
+  beforeEach(() => {
+    socket.clear();
+    __resetPresenceForTests();
+    initPresence();
+  });
+
   afterEach(() => {
     vi.unstubAllGlobals();
+    __resetPresenceForTests();
   });
 
   it('renders the directory with a Bot badge', async () => {
@@ -47,6 +93,25 @@ describe('UsersPage', () => {
     expect(await screen.findByText('Bob')).toBeInTheDocument();
     expect(screen.getByText('Echo Bot')).toBeInTheDocument();
     expect(screen.getByText('Bot')).toBeInTheDocument();
+  });
+
+  it('shows an online dot only for online users (bots never connect)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        if (input.toString().endsWith('/api/users')) return jsonResponse(200, { users });
+        throw new Error(`Unexpected fetch: ${input}`);
+      }),
+    );
+
+    renderUsersPage();
+    await screen.findByText('Bob');
+
+    // Bob (id 2) is online; the Echo Bot (id 3) is not → exactly one dot.
+    act(() => {
+      socket.emit('presence:state', [2]);
+    });
+    expect(screen.getAllByTestId('presence-dot')).toHaveLength(1);
   });
 
   it('shows the empty state when there are no other users', async () => {

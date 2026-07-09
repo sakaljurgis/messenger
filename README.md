@@ -5,7 +5,7 @@ directory, 1:1 and group chats, @mentions with autocomplete, real-time
 delivery over Socket.IO, web push notifications when the app is closed,
 webhook-based bots, attachments (images with client-side compression + HD
 toggle, server-side thumbnails, lightbox, file downloads), message edit/delete
-with tombstones, and read receipts. See [PLAN.md](PLAN.md) for the
+with tombstones, read receipts, typing indicators, and online presence dots. See [PLAN.md](PLAN.md) for the
 architecture and [examples/README.md](examples/README.md) for bots.
 
 ## Quick start (dev)
@@ -33,7 +33,7 @@ connected — mentions get a "X mentioned you in …" title.
 | Command | What it does |
 |---|---|
 | `npm run dev` | server + client dev servers, concurrently |
-| `npm test` | all workspace tests (214 tests: vitest + supertest + real-socket integration) |
+| `npm test` | all workspace tests (236 tests: vitest + supertest + real-socket integration) |
 | `npm run typecheck` | `tsc --noEmit` in all workspaces |
 | `npm run build` | production client build |
 | `npm run db:generate -w server` | regenerate Drizzle migrations after editing `server/src/db/schema.ts` |
@@ -48,9 +48,13 @@ docker compose up --build
 
 Set `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` (and `APP_ORIGIN`) in the
 environment or a `.env` next to docker-compose.yml. **Push requires HTTPS**
-outside localhost — put the container behind a TLS reverse proxy (Caddy,
-Traefik, or a platform that terminates TLS). On iOS (16.4+), push only works
-after the PWA is installed to the home screen.
+outside localhost — run the container behind your TLS reverse proxy. Make
+sure the proxy forwards WebSocket upgrades for `/socket.io` (nginx example:
+`proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection
+"upgrade"; proxy_http_version 1.1;` on that location), otherwise real-time
+silently falls back to polling. On iOS (16.4+), push only works after the
+PWA is installed to the home screen. Compose is a dev/test convenience —
+plain `docker run` with the same env vars works identically.
 
 ## Bots
 
