@@ -572,6 +572,21 @@ describe('ChatPage', () => {
     }
   });
 
+  it('group info: explains when there is nobody left to add (section never vanishes)', async () => {
+    const group: ChatSummaryDTO = {
+      id: 10, type: 'group', name: 'Team', members: [me, bob], lastMessage: null, unreadCount: 0,
+    };
+    // The whole directory is already in the group.
+    stubFetch({ messages: [msg(1, bob, 'hi team')], chat: group, users: [bob] });
+    renderChatPage();
+    await screen.findByText('hi team');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Group info' }));
+
+    expect(await screen.findByText('Add members')).toBeInTheDocument();
+    expect(await screen.findByText('Everyone is already in this group.')).toBeInTheDocument();
+  });
+
   it('group info: renaming PATCHes the trimmed name and closes the form', async () => {
     const group: ChatSummaryDTO = {
       id: 10, type: 'group', name: 'Team', members: [me, bob], lastMessage: null, unreadCount: 0,

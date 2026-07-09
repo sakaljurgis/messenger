@@ -1,12 +1,16 @@
 # Messenger PWA
 
-Mobile-first PWA messenger, feature-complete through PLAN.md phase 7: email/
-password auth, DMs + group chats, @mentions, Socket.IO real-time, web push,
-webhook bots, attachments (client compression + HD toggle, sharp thumbnails,
-lightbox), message edit/delete (tombstones), read receipts, typing indicators,
-presence dots. Personal app for a couple of users — multi-node scaling is
-explicitly out of scope. PLAN.md has the architecture/phase history; README.md
-has run/deploy instructions; examples/README.md covers bots.
+Mobile-first PWA messenger, feature-complete through PLAN.md phase 7 plus two
+post-PoC iterations: email/password auth, profile editing (name + password),
+DMs + group chats (group-info sheet: add members, rename, leave; last member
+out deletes the chat), notes-to-self DMs, @mentions, Socket.IO real-time, web
+push, webhook bots (management UI at /bots; deletes are soft — users.deletedAt
+— so message history keeps its sender), attachments (client compression + HD
+toggle, sharp thumbnails, lightbox), message edit/delete (tombstones), read
+receipts, typing indicators, presence dots. Personal app for a couple of
+users — multi-node scaling is explicitly out of scope. PLAN.md has the
+architecture/phase history; README.md has run/deploy instructions;
+examples/README.md covers bots.
 
 ## Layout (npm workspaces)
 
@@ -20,8 +24,9 @@ has run/deploy instructions; examples/README.md covers bots.
     message write goes through `createMessage` in `src/chats/service.ts`,
     which emits `message:new`; sockets (`socket.ts`), web push (`push.ts`),
     and bot webhooks (`webhooks.ts`) are three independent subscribers.
-  - `src/routes/` — auth, users, chats (+messages edit/delete), attachments,
-    push, bots (human-facing), bot-api (Bearer-token inbound for bots).
+  - `src/routes/` — auth, users (+profile/password), chats (+messages
+    edit/delete, rename, members, leave), attachments, push, bots
+    (human-facing management), bot-api (Bearer-token inbound for bots).
   - `src/storage.ts` — filesystem attachment store (UPLOADS_DIR, default
     ./data/uploads); interface kept minimal so S3 could replace it.
   - `src/auth/` — scrypt password hashing + session cookie (`sid`, httpOnly);
@@ -32,12 +37,14 @@ has run/deploy instructions; examples/README.md covers bots.
     useMessages, useChat, typing stores, readPositions), mentions (pure
     mention logic), attachments (compression, XHR upload, URLs), presence
     (online-users store), push (subscribe flow), pwa (SW registration).
-  - `src/pages/` — Login, Register, Users, ChatList, Chat, NewGroup, Settings.
+  - `src/pages/` — Login, Register, Users, ChatList, Chat, NewGroup,
+    Settings, Bots.
   - `src/components/` — AppLayout (bottom tabs), Avatar (sizes + presence
     dot), Composer (mentions autocomplete, attachments, HD toggle, edit
-    mode), Lightbox, RequireAuth.
+    mode), GroupInfo (members/add/rename/leave sheet), Lightbox, RequireAuth.
   - `public/` — manifest.webmanifest, sw.js (hand-rolled: offline shell,
-    push, notification click → /chats/:id), icons/.
+    push, notification click → /chats/:id), icons/ (source icon.svg; PNGs
+    regenerated via `npm run icons -w client`, sharp-based script).
 - `Dockerfile` — multi-stage, single container; `docker-compose.yml` is
   DEV/TEST ONLY (production runs behind the user's HTTPS reverse proxy via
   plain `docker run`; proxy must forward WebSocket upgrades on /socket.io).
@@ -71,7 +78,9 @@ DATABASE_PATH, UPLOADS_DIR, PORT.
   to download; nosniff + CSP sandbox headers on the serving endpoint.
 - **Socket fan-out targets `user:{id}` rooms** (never chat rooms) — covers
   new chats and multi-tab. Presence offline-broadcast is debounced 5s;
-  `isUserConnected` (push targeting) stays real-time.
+  `isUserConnected` (push targeting) stays real-time. Membership removals
+  emit `chat:removed` to the removed user (a non-member can't receive a
+  personalized `chat:updated` summary).
 - **No new npm deps** without explicit approval — check what's installed first.
 - **Test/process hygiene (hard rules):** never `pkill -f` generic patterns —
   track PIDs or close servers in afterEach; never run `vitest -w` (watch mode,

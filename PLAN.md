@@ -23,7 +23,7 @@ No E2E encryption.
 messenger/
 ├── client/            # Vite + React app
 │   ├── src/
-│   │   ├── pages/     # Login, Register, Users, ChatList, Chat, NewGroup, Settings
+│   │   ├── pages/     # Login, Register, Users, ChatList, Chat, NewGroup, Settings, Bots
 │   │   ├── components/
 │   │   └── lib/       # api client, socket client, push helpers
 │   ├── public/        # manifest, icons, sw.js (offline shell + push handlers)
@@ -48,7 +48,8 @@ npm workspaces tie the three packages together.
 
 ```
 users              id, email (unique), password_hash, display_name,
-                   is_bot, webhook_url?, api_token?, created_at
+                   is_bot, webhook_url?, api_token?, deleted_at? (soft delete,
+                   set when a bot is deleted), created_at
 sessions           token, user_id, expires_at
 chats              id, type ('dm'|'group'), name (null for dm), dm_key (unique,
                    "minUserId:maxUserId", null for groups), created_by, created_at
@@ -64,11 +65,15 @@ push_subscriptions id, user_id, endpoint (unique), p256dh, auth, created_at
 ```
 
 Notes:
-- `dm_key` enforces one DM per user pair at the DB level.
+- `dm_key` enforces one DM per user pair at the DB level. A self-DM ("notes
+  to self") is allowed: `dm_key` "id:id" with a single member row.
 - `last_read_message_id` drives unread counts.
 - Bots are rows in `users` with `is_bot = true` — they join chats, send and
   receive messages through the same tables as humans. This is what makes the
   webhook phase cheap.
+- Deleting a bot is a SOFT delete (`deleted_at` + credentials nulled +
+  memberships removed): `messages.sender_id` has no cascade, and history
+  should survive — the row stays so old messages still resolve a sender.
 
 ## API surface
 
@@ -78,11 +83,18 @@ POST   /api/auth/login
 POST   /api/auth/logout
 GET    /api/auth/me
 
-GET    /api/users                directory (excludes self)
+GET    /api/users                directory (excludes self and deleted bots)
+PATCH  /api/users/me             update own profile { displayName }
+PUT    /api/users/me/password    { currentPassword, newPassword }
+
 GET    /api/chats                my chats + last message + unread count
-POST   /api/chats                { userId } → DM (idempotent via dm_key)
+POST   /api/chats                { userId } → DM (idempotent via dm_key;
+                                 own id → single-member "notes to self")
                                  { name, memberIds } → group
-PATCH  /api/chats/:id/members    add members to a group
+PATCH  /api/chats/:id            rename a group { name } (any member)
+PATCH  /api/chats/:id/members    add members to a group (any member)
+POST   /api/chats/:id/leave      leave a group; the last member out deletes
+                                 the chat (+ attachment files on disk)
 GET    /api/chats/:id            single chat summary (member-only)
 GET    /api/chats/:id/messages   cursor-paginated, newest first
 POST   /api/chats/:id/messages   { content, mentions?, attachmentIds? }
@@ -97,7 +109,10 @@ POST   /api/push/subscribe       store PushSubscription
 DELETE /api/push/subscribe
 GET    /api/push/vapid-key
 
-POST   /api/bots                 create bot { name, webhookUrl } → apiToken
+POST   /api/bots                 create bot { name, webhookUrl } → apiToken (shown once)
+GET    /api/bots                 list bots incl. webhookUrl (never apiToken)
+PATCH  /api/bots/:id             set/clear a bot's webhookUrl
+DELETE /api/bots/:id             soft-delete: revoke token/webhook, leave all chats
 POST   /api/bot/messages         Bearer <apiToken>; { chatId, content } — bot replies
 ```
 
@@ -114,8 +129,10 @@ one and the send path exists exactly once.
 - On connect, the socket joins `user:{id}`; all fan-out targets user rooms
   (covers chats created after connect and multi-tab for free).
 - Server → client events: `message:new`, `message:updated` (edit/delete),
-  `chat:new`, `chat:updated`, `read:updated`, `typing`, `presence`,
-  `presence:state` (snapshot on connect).
+  `chat:new`, `chat:updated`, `chat:removed` (you left / a bot you manage was
+  pulled — a removed member can't receive a personalized summary, so their
+  clients get an explicit drop signal instead), `read:updated`, `typing`,
+  `presence`, `presence:state` (snapshot on connect).
 - Client → server: `typing` (throttled to 1/2s; membership-checked relay).
 - Presence: online broadcast on first connect, offline debounced 5s (reload
   doesn't flicker). The refcounted registry stays real-time for push
@@ -145,12 +162,20 @@ one and the send path exists exactly once.
 Single-column navigation, width-capped and centered on desktop.
 
 - `/register`, `/login` — minimal forms.
-- `/users` — directory; tap a user → opens (or creates) the DM.
+- `/users` — directory; tap a user → opens (or creates) the DM. A pinned
+  "Notes to self" entry opens the self-DM.
 - `/chats` — chat list: avatar, name, last message preview, unread badge.
+  Group rows carry a glyph + member count (message-less groups preview their
+  member names).
 - `/chats/:id` — conversation: bubbles (own right/blue, others left/gray),
-  sticky composer, mention autocomplete, day separators.
+  sticky composer, mention autocomplete, day separators. In groups, tapping
+  the header opens a group-info sheet (member list, add members, rename,
+  leave) and tapping a sender avatar reveals the full display name.
 - `/chats/new-group` — name + member multi-select.
-- `/settings` — display name, notification toggle, logout.
+- `/settings` — profile (display name + change password), notification
+  toggle, link to /bots, logout.
+- `/bots` — bot management: create (one-time apiToken reveal), edit/clear
+  webhooks, delete.
 - Bottom tab bar: Chats / People / Settings.
 
 ## Docker
@@ -203,6 +228,30 @@ Each phase ends in a working, demoable state.
 - [x] **C — Read receipts**: broadcast `lastReadMessageId` (already stored per
       member) via a `read:updated` socket event; mini avatars at each member's
       read position in groups, "Seen" in DMs.
+
+## Post-PoC iteration 2 (the 0-todo batch + follow-ups)
+
+- [x] **Original app icon**: two overlapping speech bubbles on an
+      indigo→violet gradient squircle (deliberately not Facebook's mark).
+      Source SVG at `client/public/icons/icon.svg` doubles as the favicon;
+      `npm run icons -w client` regenerates all PNGs (incl. the maskable
+      safe-zone variant) via sharp.
+- [x] **Group management**: group-info sheet in the chat header — member list
+      with presence, add members (existing PATCH), rename
+      (`PATCH /api/chats/:id`), leave (`POST /api/chats/:id/leave`). New
+      `chat:removed` socket event; the last member leaving deletes the chat
+      and its attachment files. `ChatUpdatedEvent` gained `removedMemberIds`.
+- [x] **Group affordances**: group badge (glyph + member count) in the chat
+      list, member-names preview for message-less groups, tap/hover a sender
+      avatar to reveal the full name.
+- [x] **Notes to self**: self-DM allowed server-side; pinned entry on /users.
+- [x] **Profile editing**: display name (`PATCH /api/users/me`) and password
+      (`PUT /api/users/me/password`, current password verified) in Settings.
+- [x] **Bots management UI** (/bots): list/create/edit webhooks/delete.
+      Deletion is a soft delete (see data-model notes) that also removes the
+      bot from every chat, notifying members like a leave.
+- [x] **DM bubble fix**: the 32px avatar gutter on received messages renders
+      only in groups (it exists to hold the sender avatar).
 
 ## Deliberate cuts (still out of scope)
 

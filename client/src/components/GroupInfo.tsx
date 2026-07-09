@@ -213,21 +213,28 @@ export default function GroupInfo({
             ))}
           </ul>
 
-          {addable.length > 0 && (
-            <>
-              <div className="flex items-center justify-between px-1 pb-1">
-                <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400">
-                  Add members
-                </h3>
-                <button
-                  type="button"
-                  onClick={addSelected}
-                  disabled={selected.size === 0 || busy}
-                  className="rounded-full bg-[#0084ff] px-3 py-1 text-xs font-semibold text-white transition-opacity disabled:opacity-40"
-                >
-                  {busy ? 'Adding…' : `Add${selected.size > 0 ? ` (${selected.size})` : ''}`}
-                </button>
-              </div>
+          <div className="flex items-center justify-between px-1 pb-1">
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+              Add members
+            </h3>
+            {addable.length > 0 && (
+              <button
+                type="button"
+                onClick={addSelected}
+                disabled={selected.size === 0 || busy}
+                className="rounded-full bg-[#0084ff] px-3 py-1 text-xs font-semibold text-white transition-opacity disabled:opacity-40"
+              >
+                {busy ? 'Adding…' : `Add${selected.size > 0 ? ` (${selected.size})` : ''}`}
+              </button>
+            )}
+          </div>
+          {directory === null ? (
+            <p className="mb-4 px-1 text-sm text-gray-400">Loading people…</p>
+          ) : addable.length === 0 ? (
+            <p className="mb-4 px-1 text-sm text-gray-400">
+              Everyone is already in this group.
+            </p>
+          ) : (
               <ul className="mb-4 flex flex-col">
                 {addable.map((user) => {
                   const checked = selected.has(user.id);
@@ -257,7 +264,6 @@ export default function GroupInfo({
                   );
                 })}
               </ul>
-            </>
           )}
 
           <button
