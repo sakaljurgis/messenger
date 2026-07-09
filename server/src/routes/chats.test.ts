@@ -9,6 +9,7 @@ import {
   type ChatNewEvent,
   type ChatUpdatedEvent,
   type MessageNewEvent,
+  type ReadUpdatedEvent,
 } from '../events.js';
 
 type App = ReturnType<typeof createApp>;
@@ -201,6 +202,24 @@ describe('GET /api/chats — list', () => {
     expect(s.lastMessage?.content).toBe('latest');
     expect(s.lastMessage?.sender.id).toBe(alice.user.id);
   });
+
+  it('includes each member\'s own lastReadMessageId on the summary', async () => {
+    const dm = (await alice.agent.post('/api/chats').send({ userId: bob.user.id })).body
+      .chat.id as number;
+
+    const ids: number[] = [];
+    for (let i = 0; i < 2; i++) ids.push((await send(bob, dm, `m${i}`)).body.message.id);
+    // Bob sent both, so his own marker auto-advances to the newest; Alice hasn't read yet.
+    let s = await summary(alice, dm);
+    const aliceMember = s.members.find((m) => m.id === alice.user.id)!;
+    const bobMember = s.members.find((m) => m.id === bob.user.id)!;
+    expect(aliceMember.lastReadMessageId).toBe(0);
+    expect(bobMember.lastReadMessageId).toBe(ids[1]);
+
+    await alice.agent.post(`/api/chats/${dm}/read`).send({ messageId: ids[0] });
+    s = await summary(alice, dm);
+    expect(s.members.find((m) => m.id === alice.user.id)!.lastReadMessageId).toBe(ids[0]);
+  });
 });
 
 describe('messages — access, validation, pagination', () => {
@@ -316,6 +335,61 @@ describe('POST /api/chats/:id/read', () => {
       .send({ messageId: ids[0] });
     expect(rewind.status).toBe(204);
     expect((await summary(alice, dm)).unreadCount).toBe(0);
+  });
+});
+
+describe('POST /api/chats/:id/read — read:updated event', () => {
+  let app: App;
+  let events: ChatEvents;
+  let alice: Actor;
+  let bob: Actor;
+  let dm: number;
+  let ids: number[];
+  beforeEach(async () => {
+    ({ app, events } = makeAppWithEvents());
+    alice = await register(app, 'alice@example.com', 'Alice');
+    bob = await register(app, 'bob@example.com', 'Bob');
+    dm = (await alice.agent.post('/api/chats').send({ userId: bob.user.id })).body.chat
+      .id as number;
+    ids = [];
+    for (let i = 0; i < 3; i++) ids.push((await send(bob, dm, `m${i}`)).body.message.id);
+  });
+
+  it('emits read:updated with the right payload when the marker actually advances', async () => {
+    const updates: ReadUpdatedEvent[] = [];
+    events.on('read:updated', (e) => updates.push(e));
+
+    const res = await alice.agent.post(`/api/chats/${dm}/read`).send({ messageId: ids[1] });
+    expect(res.status).toBe(204);
+
+    expect(updates).toHaveLength(1);
+    expect(updates[0]!.chat.id).toBe(dm);
+    expect(updates[0]!.userId).toBe(alice.user.id);
+    expect(updates[0]!.lastReadMessageId).toBe(ids[1]);
+    expect(new Set(updates[0]!.memberIds)).toEqual(new Set([alice.user.id, bob.user.id]));
+  });
+
+  it('does NOT emit on a repeat read of the same id', async () => {
+    const updates: ReadUpdatedEvent[] = [];
+    events.on('read:updated', (e) => updates.push(e));
+
+    await alice.agent.post(`/api/chats/${dm}/read`).send({ messageId: ids[1] });
+    expect(updates).toHaveLength(1);
+
+    const res = await alice.agent.post(`/api/chats/${dm}/read`).send({ messageId: ids[1] });
+    expect(res.status).toBe(204);
+    expect(updates).toHaveLength(1); // still just the first
+  });
+
+  it('does NOT emit when reading an older/lower id (rewind attempt)', async () => {
+    await alice.agent.post(`/api/chats/${dm}/read`).send({ messageId: ids[2] });
+
+    const updates: ReadUpdatedEvent[] = [];
+    events.on('read:updated', (e) => updates.push(e));
+
+    const res = await alice.agent.post(`/api/chats/${dm}/read`).send({ messageId: ids[0] });
+    expect(res.status).toBe(204);
+    expect(updates).toHaveLength(0);
   });
 });
 

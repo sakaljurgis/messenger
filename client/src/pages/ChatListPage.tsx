@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import type { ChatSummaryDTO } from '@messenger/shared';
 import { useAuth } from '../lib/auth';
 import { chatTitle, formatListTime, otherMember, useChats } from '../lib/chats';
+import { attachmentPreviewText } from '../lib/attachments';
 import { enablePush, pushSupported } from '../lib/push';
 import Avatar from '../components/Avatar';
 
@@ -76,8 +77,11 @@ function NewGroupIcon() {
 
 function previewText(chat: ChatSummaryDTO, meId: number): string {
   if (!chat.lastMessage) return 'No messages yet';
-  const prefix = chat.lastMessage.sender.id === meId ? 'You: ' : '';
-  return `${prefix}${chat.lastMessage.content}`;
+  const { content, attachments, sender, isDeleted } = chat.lastMessage;
+  const prefix = sender.id === meId ? 'You: ' : '';
+  if (isDeleted) return `${prefix}Message deleted`;
+  const body = content === '' && attachments.length > 0 ? attachmentPreviewText(attachments) : content;
+  return `${prefix}${body}`;
 }
 
 function ChatRow({ chat, meId }: { chat: ChatSummaryDTO; meId: number }) {
@@ -107,7 +111,9 @@ function ChatRow({ chat, meId }: { chat: ChatSummaryDTO; meId: number }) {
             )}
           </div>
           <div className="flex items-center justify-between gap-2">
-            <span className={`truncate text-sm ${unread ? 'font-medium text-gray-700' : 'text-gray-500'}`}>
+            <span
+              className={`truncate text-sm ${chat.lastMessage?.isDeleted ? 'italic ' : ''}${unread ? 'font-medium text-gray-700' : 'text-gray-500'}`}
+            >
               {previewText(chat, meId)}
             </span>
             {unread && (

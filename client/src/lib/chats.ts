@@ -9,14 +9,16 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
+  ChatMemberDTO,
   ChatSummaryDTO,
+  EditMessageRequest,
   MessageDTO,
   MessagesPage,
   SendMessageRequest,
   ServerToClientEvents,
   UserDTO,
 } from '@messenger/shared';
-import { apiGet, apiPost } from './api';
+import { apiDelete, apiGet, apiPatch, apiPost } from './api';
 import { getSocket } from './socket';
 
 const PAGE_LIMIT = 30;
@@ -69,6 +71,27 @@ export function mergeMessages(existing: MessageDTO[], incoming: MessageDTO[]): M
   return [...byId.values()].sort((a, b) => a.id - b.id);
 }
 
+/**
+ * Replace a message in place by id (for live `message:updated` edits/deletes).
+ * Unlike {@link mergeMessages} this never *adds* the message: an update for one
+ * we haven't loaded (e.g. far up the history) is ignored rather than injected
+ * out of context. Returns the same array reference when nothing matched.
+ */
+export function replaceMessage(existing: MessageDTO[], updated: MessageDTO): MessageDTO[] {
+  let found = false;
+  const next = existing.map((m) => {
+    if (m.id !== updated.id) return m;
+    found = true;
+    return updated;
+  });
+  return found ? next : existing;
+}
+
+/** Neuter a message into its tombstone form (optimistic local delete). */
+export function tombstone(message: MessageDTO): MessageDTO {
+  return { ...message, content: '', mentions: [], attachments: [], editedAt: null, isDeleted: true };
+}
+
 /** Recent-activity key for sort: last message time, or "now" for an empty (just-created) chat. */
 function chatActivity(chat: ChatSummaryDTO): number {
   return chat.lastMessage ? Date.parse(chat.lastMessage.createdAt) : Number.MAX_SAFE_INTEGER;
@@ -83,6 +106,62 @@ function chatActivity(chat: ChatSummaryDTO): number {
 export function upsertChat(chats: ChatSummaryDTO[], incoming: ChatSummaryDTO): ChatSummaryDTO[] {
   const others = chats.filter((c) => c.id !== incoming.id);
   return [incoming, ...others].sort((a, b) => chatActivity(b) - chatActivity(a));
+}
+
+/**
+ * The newest message in the (ascending, by id) `messages` array with
+ * `id <= targetId`, or null if none qualifies. `messages` is assumed sorted
+ * ascending, so the search can stop at the first id that overshoots.
+ */
+function newestAtOrBelow(messages: MessageDTO[], targetId: number): number | null {
+  let result: number | null = null;
+  for (const m of messages) {
+    if (m.id <= targetId) result = m.id;
+    else break;
+  }
+  return result;
+}
+
+/**
+ * Groups every other member's read-receipt avatar onto the message it belongs
+ * under: the newest currently-loaded message they've read. Read receipts are
+ * "seen up to" markers (Messenger-style), so multiple members who've read the
+ * same amount cluster on the same anchor message.
+ *
+ * Rules, per member (excluding `meId`):
+ *  - `lastReadMessageId === 0` (never marked anything read — this is also how
+ *    bots, which never call the read endpoint, are naturally excluded) → hidden.
+ *  - Behind the loaded window (`lastReadMessageId` < the oldest loaded message
+ *    id) → hidden; we have no message to anchor the avatar to.
+ *  - Read past the newest loaded message → clamped to the newest loaded message
+ *    (they're caught up with everything we can currently show).
+ *  - Otherwise → the newest loaded message with `id <= lastReadMessageId`.
+ *
+ * Returns a Map from anchor message id to the members whose read position
+ * lands there. Chats with no loaded messages yield an empty map.
+ */
+export function readPositions(
+  messages: MessageDTO[],
+  members: ChatMemberDTO[],
+  meId: number,
+): Map<number, ChatMemberDTO[]> {
+  const result = new Map<number, ChatMemberDTO[]>();
+  if (messages.length === 0) return result;
+  const oldestId = messages[0]!.id;
+  const newestId = messages[messages.length - 1]!.id;
+
+  for (const member of members) {
+    if (member.id === meId) continue;
+    const read = member.lastReadMessageId;
+    if (read <= 0) continue;
+    if (read < oldestId) continue;
+    const anchorId = read >= newestId ? newestId : newestAtOrBelow(messages, read);
+    if (anchorId === null) continue;
+    const list = result.get(anchorId) ?? [];
+    list.push(member);
+    result.set(anchorId, list);
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -224,6 +303,11 @@ export function useChats(): UseChatsResult {
   // A new message changes ordering and (someone else's) unread count; refetch so
   // the list matches the server's read-aware counts rather than guessing locally.
   useSocketEvent('message:new', () => void load());
+  // An edit/delete can change a chat's last-message preview and unread count.
+  useSocketEvent('message:updated', () => void load());
+  // read:updated deliberately has no listener here: the chat list doesn't render
+  // per-member read receipts (that's ChatPage's job via useChat below), and its
+  // own unread count already comes from `unreadCount` on the summary.
 
   return { chats, loading, error, refresh: () => void load() };
 }
@@ -237,8 +321,10 @@ export interface UseChatResult {
 
 /**
  * A single chat summary (title, members, unread). Live via Socket.IO: a
- * `chat:updated` for this chat (e.g. members added) is applied directly, and we
- * re-fetch on focus/reconnect to catch up on anything missed.
+ * `chat:updated` for this chat (e.g. members added) is applied directly, a
+ * `read:updated` patches just the affected member's `lastReadMessageId` (so
+ * read-receipt rendering updates without a refetch), and we re-fetch on
+ * focus/reconnect to catch up on anything missed.
  */
 export function useChat(chatId: number): UseChatResult {
   const [chat, setChat] = useState<ChatSummaryDTO | null>(null);
@@ -268,6 +354,19 @@ export function useChat(chatId: number): UseChatResult {
     if (updated.id === chatId) setChat(updated);
   });
 
+  // A member's read marker advanced: patch just that member in place rather
+  // than refetching the whole summary.
+  useSocketEvent('read:updated', ({ chatId: eventChatId, userId, lastReadMessageId }) => {
+    if (eventChatId !== chatId) return;
+    setChat((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        members: prev.members.map((m) => (m.id === userId ? { ...m, lastReadMessageId } : m)),
+      };
+    });
+  });
+
   return { chat, loading, error, refresh: () => void load() };
 }
 
@@ -275,7 +374,9 @@ export interface UseMessagesResult {
   messages: MessageDTO[];
   loadOlder: () => Promise<void>;
   hasMore: boolean;
-  sendMessage: (content: string, mentions?: number[]) => Promise<MessageDTO>;
+  sendMessage: (content: string, mentions?: number[], attachmentIds?: number[]) => Promise<MessageDTO>;
+  editMessage: (messageId: number, content: string, mentions?: number[]) => Promise<MessageDTO>;
+  deleteMessage: (messageId: number) => Promise<void>;
   loading: boolean;
   error: string | null;
 }
@@ -329,6 +430,13 @@ export function useMessages(chatId: number): UseMessagesResult {
     }
   });
 
+  // Live edit/delete: replace the message in place (a tombstone when deleted).
+  useSocketEvent('message:updated', (message) => {
+    if (message.chatId === chatId) {
+      setMessages((prev) => replaceMessage(prev, message));
+    }
+  });
+
   // Catch-up on focus / reconnect: refetch the newest page and merge, closing
   // any gap where a message:new arrived while the socket was disconnected.
   useLiveRefresh(() => {
@@ -349,12 +457,38 @@ export function useMessages(chatId: number): UseMessagesResult {
   }, [chatId, olderCursor]);
 
   const sendMessage = useCallback(
-    async (content: string, mentions?: number[]): Promise<MessageDTO> => {
-      const body: SendMessageRequest =
-        mentions && mentions.length > 0 ? { content, mentions } : { content };
+    async (content: string, mentions?: number[], attachmentIds?: number[]): Promise<MessageDTO> => {
+      const body: SendMessageRequest = { content };
+      if (mentions && mentions.length > 0) body.mentions = mentions;
+      if (attachmentIds && attachmentIds.length > 0) body.attachmentIds = attachmentIds;
       const res = await apiPost<{ message: MessageDTO }>(`/api/chats/${chatId}/messages`, body);
       setMessages((prev) => mergeMessages(prev, [res.message]));
       return res.message;
+    },
+    [chatId],
+  );
+
+  const editMessage = useCallback(
+    async (messageId: number, content: string, mentions?: number[]): Promise<MessageDTO> => {
+      const body: EditMessageRequest = { content };
+      if (mentions && mentions.length > 0) body.mentions = mentions;
+      const res = await apiPatch<{ message: MessageDTO }>(
+        `/api/chats/${chatId}/messages/${messageId}`,
+        body,
+      );
+      setMessages((prev) => replaceMessage(prev, res.message));
+      return res.message;
+    },
+    [chatId],
+  );
+
+  const deleteMessage = useCallback(
+    async (messageId: number): Promise<void> => {
+      // Optimistic tombstone; the server's message:updated echo reconciles it.
+      setMessages((prev) =>
+        prev.map((m) => (m.id === messageId ? tombstone(m) : m)),
+      );
+      await apiDelete(`/api/chats/${chatId}/messages/${messageId}`);
     },
     [chatId],
   );
@@ -364,6 +498,8 @@ export function useMessages(chatId: number): UseMessagesResult {
     loadOlder,
     hasMore: olderCursor !== null,
     sendMessage,
+    editMessage,
+    deleteMessage,
     loading,
     error,
   };

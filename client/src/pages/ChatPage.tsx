@@ -1,6 +1,6 @@
-import { useEffect, useLayoutEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import type { MessageDTO, UserDTO } from '@messenger/shared';
+import type { AttachmentDTO, ChatMemberDTO, MessageDTO, UserDTO } from '@messenger/shared';
 import { useAuth } from '../lib/auth';
 import { splitByMentions } from '../lib/mentions';
 import {
@@ -8,12 +8,15 @@ import {
   formatDaySeparator,
   formatMessageTime,
   markRead,
+  readPositions,
   sameCalendarDay,
   useChat,
   useMessages,
 } from '../lib/chats';
+import { attachmentUrl, formatBytes } from '../lib/attachments';
 import Avatar from '../components/Avatar';
 import Composer from '../components/Composer';
+import Lightbox from '../components/Lightbox';
 
 const NEAR_BOTTOM_PX = 100;
 
@@ -22,6 +25,131 @@ function BackIcon() {
     <svg viewBox="0 0 24 24" className="h-6 w-6" fill="none" stroke="currentColor" strokeWidth={2}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M15 18l-6-6 6-6" />
     </svg>
+  );
+}
+
+function DotsIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="h-4 w-4" fill="currentColor" aria-hidden="true">
+      <circle cx="5" cy="12" r="1.6" />
+      <circle cx="12" cy="12" r="1.6" />
+      <circle cx="19" cy="12" r="1.6" />
+    </svg>
+  );
+}
+
+/** How long a touch must be held before the actions menu opens (mobile long-press). */
+const LONG_PRESS_MS = 500;
+
+/** A deleted message: a muted, italic outline bubble with no fill and no menu. */
+function TombstoneBubble() {
+  return (
+    <div className="rounded-2xl border border-gray-200 px-3 py-2 text-sm italic text-gray-400">
+      Message deleted
+    </div>
+  );
+}
+
+/**
+ * Wraps an own, non-deleted bubble with an Edit/Delete affordance: a '⋯' button
+ * that fades in on hover (desktop) and a long-press / right-click on the bubble
+ * itself (mobile) — both open a small popover menu. The menu closes on an
+ * outside tap/click or Escape.
+ */
+function MessageActions({
+  onEdit,
+  onDelete,
+  children,
+}: {
+  onEdit: () => void;
+  onDelete: () => void;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const timerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointer = (e: MouseEvent | TouchEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', onPointer);
+    document.addEventListener('touchstart', onPointer);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onPointer);
+      document.removeEventListener('touchstart', onPointer);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  function cancelPress() {
+    if (timerRef.current !== null) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+  }
+
+  return (
+    <div ref={wrapRef} className="group relative flex items-center gap-1">
+      <button
+        type="button"
+        aria-label="Message actions"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full text-gray-400 opacity-0 transition-opacity hover:bg-gray-100 focus:opacity-100 group-hover:opacity-100"
+      >
+        <DotsIcon />
+      </button>
+      <div
+        onTouchStart={() => {
+          cancelPress();
+          timerRef.current = window.setTimeout(() => setOpen(true), LONG_PRESS_MS);
+        }}
+        onTouchEnd={cancelPress}
+        onTouchMove={cancelPress}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setOpen(true);
+        }}
+      >
+        {children}
+      </div>
+      {open && (
+        <div
+          role="menu"
+          className="absolute right-0 top-full z-10 mt-1 min-w-[8rem] overflow-hidden rounded-xl border border-gray-200 bg-white py-1 shadow-lg"
+        >
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              setOpen(false);
+              onEdit();
+            }}
+            className="block w-full px-4 py-2 text-left text-sm text-gray-700 transition-colors hover:bg-gray-100"
+          >
+            Edit
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              setOpen(false);
+              onDelete();
+            }}
+            className="block w-full px-4 py-2 text-left text-sm text-red-600 transition-colors hover:bg-gray-100"
+          >
+            Delete
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -91,7 +219,159 @@ function MessageContent({
   );
 }
 
-function MessageRow({ row, members, meId }: { row: Row; members: UserDTO[]; meId: number }) {
+function FileIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="h-7 w-7 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M14 2v6h6" />
+    </svg>
+  );
+}
+
+/** Image attachments: one bare rounded image, or a 2-column grid of square tiles. */
+function AttachmentImages({
+  images,
+  onOpen,
+}: {
+  images: AttachmentDTO[];
+  onOpen: (a: AttachmentDTO) => void;
+}) {
+  if (images.length === 1) {
+    const img = images[0]!;
+    return (
+      <button type="button" onClick={() => onOpen(img)} className="block overflow-hidden rounded-2xl">
+        <img
+          src={attachmentUrl(img.id, { thumb: img.hasThumb })}
+          alt={img.originalName}
+          width={img.width ?? undefined}
+          height={img.height ?? undefined}
+          loading="lazy"
+          className="max-h-80 max-w-full object-cover"
+        />
+      </button>
+    );
+  }
+
+  return (
+    <div className="grid w-full grid-cols-2 gap-1">
+      {images.map((img) => (
+        <button
+          key={img.id}
+          type="button"
+          onClick={() => onOpen(img)}
+          className="block aspect-square overflow-hidden rounded-lg"
+        >
+          <img
+            src={attachmentUrl(img.id, { thumb: img.hasThumb })}
+            alt={img.originalName}
+            loading="lazy"
+            className="h-full w-full object-cover"
+          />
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** Non-image attachment: a download card styled like the message bubble. */
+function AttachmentFile({ file, isMine }: { file: AttachmentDTO; isMine: boolean }) {
+  const bubble = isMine ? 'bg-[#0084ff] text-white' : 'bg-gray-200 text-gray-900';
+  const sub = isMine ? 'text-white/70' : 'text-gray-500';
+  return (
+    <a
+      href={attachmentUrl(file.id, { download: true })}
+      download={file.originalName}
+      className={`flex max-w-[16rem] items-center gap-3 rounded-2xl px-3 py-2 ${bubble}`}
+    >
+      <FileIcon />
+      <span className="flex min-w-0 flex-col">
+        <span className="truncate font-medium">{file.originalName}</span>
+        <span className={`text-xs ${sub}`}>{formatBytes(file.sizeBytes)}</span>
+      </span>
+    </a>
+  );
+}
+
+/** The stacked content of a bubble: image block, file cards, then the text bubble
+ *  (omitted for attachment-only messages, whose images render bare). */
+function MessageStack({
+  message,
+  members,
+  meId,
+  isMine,
+  onOpenImage,
+}: {
+  message: MessageDTO;
+  members: UserDTO[];
+  meId: number;
+  isMine: boolean;
+  onOpenImage: (a: AttachmentDTO) => void;
+}) {
+  const images = message.attachments.filter((a) => a.kind === 'image');
+  const files = message.attachments.filter((a) => a.kind === 'file');
+  const hasText = message.content.length > 0;
+  const bubble = isMine ? 'bg-[#0084ff] text-white' : 'bg-gray-200 text-gray-900';
+
+  return (
+    <div className={`flex w-full flex-col gap-1 ${isMine ? 'items-end' : 'items-start'}`}>
+      {images.length > 0 && <AttachmentImages images={images} onOpen={onOpenImage} />}
+      {files.map((f) => (
+        <AttachmentFile key={f.id} file={f} isMine={isMine} />
+      ))}
+      {hasText && (
+        <div className={`whitespace-pre-wrap break-words rounded-2xl px-3 py-2 ${bubble}`}>
+          <MessageContent message={message} members={members} meId={meId} isMine={isMine} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** The `14:32 (edited)` line under the last bubble of a run. */
+function TimeLabel({ message, indent }: { message: MessageDTO; indent: boolean }) {
+  return (
+    <span className={`mt-0.5 text-[10px] text-gray-400 ${indent ? 'ml-1' : ''}`}>
+      {formatMessageTime(message.createdAt)}
+      {message.editedAt && <span className="ml-1">(edited)</span>}
+    </span>
+  );
+}
+
+/**
+ * Read-receipt row: mini overlapping avatars of every member whose read
+ * position is anchored on this message, right-aligned under the row (in a DM
+ * this is just the other member — Messenger-style "seen"). `title` exposes
+ * the names for a hover tooltip.
+ */
+function ReadReceipts({ members }: { members: ChatMemberDTO[] }) {
+  if (members.length === 0) return null;
+  const names = members.map((m) => m.displayName).join(', ');
+  return (
+    <div className="flex justify-end px-3" title={names}>
+      <div className="flex -space-x-1">
+        {members.map((m) => (
+          <Avatar key={m.id} name={m.displayName} id={m.id} size="xs" />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function MessageRow({
+  row,
+  members,
+  meId,
+  onOpenImage,
+  onEdit,
+  onDelete,
+}: {
+  row: Row;
+  members: UserDTO[];
+  meId: number;
+  onOpenImage: (a: AttachmentDTO) => void;
+  onEdit: (message: MessageDTO) => void;
+  onDelete: (message: MessageDTO) => void;
+}) {
   const { message, isMine, showSender, showAvatar, showTime, isRunStart } = row;
   const spacing = isRunStart ? 'mt-3' : 'mt-0.5';
 
@@ -99,12 +379,14 @@ function MessageRow({ row, members, meId }: { row: Row; members: UserDTO[]; meId
     return (
       <div className={`flex justify-end px-3 ${spacing}`}>
         <div className="flex max-w-[75%] flex-col items-end">
-          <div className="whitespace-pre-wrap break-words rounded-2xl bg-[#0084ff] px-3 py-2 text-white">
-            <MessageContent message={message} members={members} meId={meId} isMine />
-          </div>
-          {showTime && (
-            <span className="mt-0.5 text-[10px] text-gray-400">{formatMessageTime(message.createdAt)}</span>
+          {message.isDeleted ? (
+            <TombstoneBubble />
+          ) : (
+            <MessageActions onEdit={() => onEdit(message)} onDelete={() => onDelete(message)}>
+              <MessageStack message={message} members={members} meId={meId} isMine onOpenImage={onOpenImage} />
+            </MessageActions>
           )}
+          {showTime && <TimeLabel message={message} indent={false} />}
         </div>
       </div>
     );
@@ -120,14 +402,18 @@ function MessageRow({ row, members, meId }: { row: Row; members: UserDTO[]; meId
           {showSender && (
             <span className="mb-0.5 ml-1 text-xs text-gray-500">{message.sender.displayName}</span>
           )}
-          <div className="whitespace-pre-wrap break-words rounded-2xl bg-gray-200 px-3 py-2 text-gray-900">
-            <MessageContent message={message} members={members} meId={meId} isMine={false} />
-          </div>
-          {showTime && (
-            <span className="mt-0.5 ml-1 text-[10px] text-gray-400">
-              {formatMessageTime(message.createdAt)}
-            </span>
+          {message.isDeleted ? (
+            <TombstoneBubble />
+          ) : (
+            <MessageStack
+              message={message}
+              members={members}
+              meId={meId}
+              isMine={false}
+              onOpenImage={onOpenImage}
+            />
           )}
+          {showTime && <TimeLabel message={message} indent />}
         </div>
       </div>
     </div>
@@ -141,18 +427,28 @@ export default function ChatPage() {
   const meId = user?.id ?? -1;
 
   const { chat } = useChat(chatId);
-  const { messages, loadOlder, hasMore, sendMessage, loading } = useMessages(chatId);
+  const { messages, loadOlder, hasMore, sendMessage, editMessage, deleteMessage, loading } =
+    useMessages(chatId);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true); // is the viewport near the bottom?
   const didInitialScroll = useRef(false);
   const lastMarkedId = useRef<number>(-1);
+  const [lightbox, setLightbox] = useState<AttachmentDTO | null>(null);
+  const [editing, setEditing] = useState<MessageDTO | null>(null);
 
   const isGroup = chat?.type === 'group';
   const title = chat ? chatTitle(chat, meId) : 'Chat';
   const members = chat?.members ?? [];
   const rows = buildRows(messages, meId, isGroup);
+  // Anchor message id -> members whose read position lands there. Recomputed
+  // from live state (messages + chat.members, which useChat patches in place
+  // on `read:updated`), so receipts move on their own without extra plumbing.
+  const receiptsByMessageId = useMemo(
+    () => readPositions(messages, members, meId),
+    [messages, members, meId],
+  );
 
   function onScroll() {
     const el = scrollRef.current;
@@ -173,12 +469,16 @@ export default function ChatPage() {
     }
   }, [messages]);
 
-  // Mark read up to the newest message whenever the list changes.
+  // Mark read up to the newest message whenever the list changes. Best-effort
+  // and fire-and-forget (nothing in the UI depends on the response) — a
+  // transient failure just means the next message/focus/reconnect retries it.
   useEffect(() => {
     const newest = messages[messages.length - 1];
     if (!newest || newest.id === lastMarkedId.current) return;
     lastMarkedId.current = newest.id;
-    void markRead(chatId, newest.id);
+    markRead(chatId, newest.id).catch(() => {
+      /* best-effort — the read marker is re-sent on the next message anyway */
+    });
   }, [chatId, messages]);
 
   async function handleLoadOlder() {
@@ -192,9 +492,21 @@ export default function ChatPage() {
     });
   }
 
-  async function handleSend(content: string, mentions: number[]) {
+  async function handleSend(content: string, mentions: number[], attachmentIds: number[]) {
     stickToBottom.current = true;
-    await sendMessage(content, mentions);
+    await sendMessage(content, mentions, attachmentIds);
+  }
+
+  function handleDelete(message: MessageDTO) {
+    if (window.confirm('Delete this message?')) {
+      if (editing?.id === message.id) setEditing(null);
+      void deleteMessage(message.id);
+    }
+  }
+
+  async function handleEditSubmit(messageId: number, content: string, mentions: number[]) {
+    await editMessage(messageId, content, mentions);
+    setEditing(null);
   }
 
   return (
@@ -245,14 +557,32 @@ export default function ChatPage() {
                   </span>
                 </div>
               )}
-              <MessageRow row={row} members={members} meId={meId} />
+              <MessageRow
+                row={row}
+                members={members}
+                meId={meId}
+                onOpenImage={setLightbox}
+                onEdit={setEditing}
+                onDelete={handleDelete}
+              />
+              <ReadReceipts members={receiptsByMessageId.get(row.message.id) ?? []} />
             </div>
           ))
         )}
         <div ref={bottomRef} />
       </div>
 
-      <Composer onSend={handleSend} members={members} meId={meId} />
+      <Composer
+        onSend={handleSend}
+        members={members}
+        meId={meId}
+        chatId={chatId}
+        editing={editing}
+        onEditSubmit={handleEditSubmit}
+        onCancelEdit={() => setEditing(null)}
+      />
+
+      {lightbox && <Lightbox attachment={lightbox} onClose={() => setLightbox(null)} />}
     </div>
   );
 }

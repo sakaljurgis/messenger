@@ -169,6 +169,25 @@ cloudflared.
 
 Each phase ends in a working, demoable state.
 
+## Post-PoC iteration 1
+
+- [x] **A — Attachments**: files on the volume (`UPLOADS_DIR`, default
+      `./data/uploads`) behind a storage interface, metadata in an
+      `attachments` table. Two-step flow: multipart upload to the chat →
+      attachment id → linked on message send (empty text allowed with
+      attachments). Client compresses images by default (canvas, ~2048px)
+      with an HD toggle to upload originals; server generates ≤512px webp
+      thumbnails via sharp. Authenticated streaming endpoint (thumb/full/
+      download variants, nosniff + CSP sandbox, SVG never inline), lightbox
+      preview, file download cards, 25MB cap, orphan cleanup on boot.
+- [x] **B — Edit/delete**: `edited_at`/`deleted_at` on messages, own-message
+      PATCH/DELETE endpoints, `message:updated` socket event, hover/long-press
+      menu, "(edited)" label, "Message deleted" tombstones, attachment files
+      removed on delete, no push for edits.
+- [x] **C — Read receipts**: broadcast `lastReadMessageId` (already stored per
+      member) via a `read:updated` socket event; mini avatars at each member's
+      read position in groups, "Seen" in DMs.
+
 ## Deliberate PoC cuts
 
 No E2E encryption, no message editing/deletion, no attachments/images, no read

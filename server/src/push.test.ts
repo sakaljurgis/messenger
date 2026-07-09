@@ -124,7 +124,17 @@ describe('buildPushPayload', () => {
   const sender: UserDTO = { id: 1, email: 'a@x.com', displayName: 'Alice', isBot: false };
   const dm = { id: 10, type: 'dm', name: null } as ChatRow;
   const group = { id: 11, type: 'group', name: 'Team' } as ChatRow;
-  const base = { id: 5, chatId: 11, sender, content: 'hi', mentions: [], createdAt: '' };
+  const base = {
+    id: 5,
+    chatId: 11,
+    sender,
+    content: 'hi',
+    mentions: [],
+    attachments: [],
+    createdAt: '',
+    editedAt: null,
+    isDeleted: false,
+  };
 
   it('uses the sender name as the title for a DM', () => {
     expect(buildPushPayload({ ...base, chatId: 10 }, dm, 2).title).toBe('Alice');

@@ -14,7 +14,7 @@ export class ApiError extends Error {
   }
 }
 
-function extractErrorMessage(data: unknown): string | undefined {
+export function extractErrorMessage(data: unknown): string | undefined {
   if (data && typeof data === 'object' && 'error' in data) {
     const message = (data as Record<string, unknown>).error;
     if (typeof message === 'string') {
@@ -61,6 +61,13 @@ export function apiGet<T>(path: string): Promise<T> {
 export function apiPost<T>(path: string, body?: unknown): Promise<T> {
   return api<T>(path, {
     method: 'POST',
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+}
+
+export function apiPatch<T>(path: string, body?: unknown): Promise<T> {
+  return api<T>(path, {
+    method: 'PATCH',
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
 }

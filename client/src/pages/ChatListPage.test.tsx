@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import type { ChatSummaryDTO, MessageDTO, UserDTO } from '@messenger/shared';
+import type { AttachmentDTO, ChatMemberDTO, ChatSummaryDTO, MessageDTO, UserDTO } from '@messenger/shared';
 import ChatListPage from './ChatListPage';
 import { AuthProvider } from '../lib/auth';
 
@@ -51,12 +51,12 @@ function jsonResponse(status: number, body: unknown): Response {
   } as unknown as Response;
 }
 
-const me: UserDTO = { id: 1, email: 'me@example.com', displayName: 'Me', isBot: false };
-const bob: UserDTO = { id: 2, email: 'bob@example.com', displayName: 'Bob', isBot: false };
-const carol: UserDTO = { id: 3, email: 'carol@example.com', displayName: 'Carol', isBot: false };
+const me: ChatMemberDTO = { id: 1, email: 'me@example.com', displayName: 'Me', isBot: false, lastReadMessageId: 0 };
+const bob: ChatMemberDTO = { id: 2, email: 'bob@example.com', displayName: 'Bob', isBot: false, lastReadMessageId: 0 };
+const carol: ChatMemberDTO = { id: 3, email: 'carol@example.com', displayName: 'Carol', isBot: false, lastReadMessageId: 0 };
 
 function msg(id: number, sender: UserDTO, content: string): MessageDTO {
-  return { id, chatId: 1, sender, content, mentions: [], createdAt: new Date().toISOString() };
+  return { id, chatId: 1, sender, content, mentions: [], attachments: [], createdAt: new Date().toISOString(), editedAt: null, isDeleted: false };
 }
 
 const chats: ChatSummaryDTO[] = [
@@ -147,5 +147,47 @@ describe('ChatListPage', () => {
     });
 
     expect(await screen.findByText('Fresh Group')).toBeInTheDocument();
+  });
+
+  it('previews a deleted last message as italic "Message deleted", keeping the You: prefix', async () => {
+    const fromBob: MessageDTO = { ...msg(8, bob, ''), content: '', isDeleted: true };
+    const fromMe: MessageDTO = { ...msg(9, me, ''), content: '', isDeleted: true };
+
+    stubFetch([
+      { id: 30, type: 'dm', name: null, members: [me, bob], lastMessage: fromBob, unreadCount: 0 },
+      { id: 31, type: 'group', name: 'Squad', members: [me, bob], lastMessage: fromMe, unreadCount: 0 },
+    ]);
+    renderChatList();
+
+    const theirs = await screen.findByText('Message deleted');
+    expect(theirs).toBeInTheDocument();
+    expect(theirs.className).toContain('italic');
+    // "You:" prefix logic still applies for my own deleted message.
+    expect(screen.getByText('You: Message deleted')).toBeInTheDocument();
+  });
+
+  it('previews empty-content messages with attachments', async () => {
+    const photo: AttachmentDTO = {
+      id: 1,
+      kind: 'image',
+      originalName: 'p.jpg',
+      mimeType: 'image/jpeg',
+      sizeBytes: 1000,
+      width: 100,
+      height: 100,
+      hasThumb: true,
+    };
+    const fromBob: MessageDTO = { ...msg(8, bob, ''), attachments: [photo] };
+    const fromMe: MessageDTO = { ...msg(9, me, ''), attachments: [photo] };
+
+    stubFetch([
+      { id: 30, type: 'dm', name: null, members: [me, bob], lastMessage: fromBob, unreadCount: 0 },
+      { id: 31, type: 'group', name: 'Album', members: [me, bob], lastMessage: fromMe, unreadCount: 0 },
+    ]);
+    renderChatList();
+
+    expect(await screen.findByText('📷 Photo')).toBeInTheDocument();
+    // "You:" prefix logic still applies for my own attachment message.
+    expect(screen.getByText('You: 📷 Photo')).toBeInTheDocument();
   });
 });

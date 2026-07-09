@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen } from '@testing-library/react';
+import { act, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import type { ChatSummaryDTO, MessageDTO, UserDTO } from '@messenger/shared';
+import type { AttachmentDTO, ChatMemberDTO, ChatSummaryDTO, MessageDTO, UserDTO } from '@messenger/shared';
 import ChatPage from './ChatPage';
 import { AuthProvider } from '../lib/auth';
+import { formatBytes } from '../lib/attachments';
 
 // A tiny in-memory stand-in for the Socket.IO client so tests can drive server
 // events synchronously (and no real connection is opened in jsdom).
@@ -51,11 +52,11 @@ function jsonResponse(status: number, body: unknown): Response {
   } as unknown as Response;
 }
 
-const me: UserDTO = { id: 1, email: 'me@example.com', displayName: 'Me', isBot: false };
-const bob: UserDTO = { id: 2, email: 'bob@example.com', displayName: 'Bob', isBot: false };
+const me: ChatMemberDTO = { id: 1, email: 'me@example.com', displayName: 'Me', isBot: false, lastReadMessageId: 0 };
+const bob: ChatMemberDTO = { id: 2, email: 'bob@example.com', displayName: 'Bob', isBot: false, lastReadMessageId: 0 };
 
 function msg(id: number, sender: UserDTO, content: string): MessageDTO {
-  return { id, chatId: 10, sender, content, mentions: [], createdAt: new Date(1_700_000_000_000 + id * 1000).toISOString() };
+  return { id, chatId: 10, sender, content, mentions: [], attachments: [], createdAt: new Date(1_700_000_000_000 + id * 1000).toISOString(), editedAt: null, isDeleted: false };
 }
 
 const dmChat: ChatSummaryDTO = {
@@ -67,17 +68,20 @@ const dmChat: ChatSummaryDTO = {
   unreadCount: 0,
 };
 
-/** Mock covering every endpoint ChatPage touches; POST /messages is customizable. */
+/** Mock covering every endpoint ChatPage touches; POST/PATCH /messages are customizable. */
 function stubFetch(options: {
   messages: MessageDTO[];
+  chat?: ChatSummaryDTO;
   onPost?: (body: unknown) => MessageDTO;
+  onPatch?: (body: { content: string; mentions?: number[] }, id: number) => MessageDTO;
 }) {
+  const chat = options.chat ?? dmChat;
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = input.toString();
     const method = init?.method ?? 'GET';
 
     if (url.endsWith('/api/auth/me')) return jsonResponse(200, { user: me });
-    if (url.match(/\/api\/chats\/\d+$/)) return jsonResponse(200, { chat: dmChat });
+    if (url.match(/\/api\/chats\/\d+$/)) return jsonResponse(200, { chat });
     if (url.includes('/messages') && method === 'GET') {
       return jsonResponse(200, { messages: options.messages, nextCursor: null });
     }
@@ -86,6 +90,17 @@ function stubFetch(options: {
       const message = options.onPost ? options.onPost(body) : msg(99, me, body.content);
       return jsonResponse(201, { message });
     }
+    if (url.includes('/messages') && method === 'PATCH') {
+      const body = JSON.parse(init?.body as string) as { content: string; mentions?: number[] };
+      const id = Number(url.split('/').pop());
+      const message = options.onPatch
+        ? options.onPatch(body, id)
+        : { ...msg(id, me, body.content), editedAt: new Date().toISOString() };
+      return jsonResponse(200, { message });
+    }
+    if (url.includes('/messages') && method === 'DELETE') {
+      return jsonResponse(204, {});
+    }
     if (url.includes('/read')) return jsonResponse(204, {});
     throw new Error(`Unexpected fetch: ${method} ${url}`);
   });
@@ -93,8 +108,34 @@ function stubFetch(options: {
   return fetchMock;
 }
 
+function imageAttachment(id: number, name = 'photo.jpg'): AttachmentDTO {
+  return {
+    id,
+    kind: 'image',
+    originalName: name,
+    mimeType: 'image/jpeg',
+    sizeBytes: 2048,
+    width: 800,
+    height: 600,
+    hasThumb: true,
+  };
+}
+
+function fileAttachment(id: number, name = 'report.pdf', sizeBytes = 3_355_443): AttachmentDTO {
+  return {
+    id,
+    kind: 'file',
+    originalName: name,
+    mimeType: 'application/pdf',
+    sizeBytes,
+    width: null,
+    height: null,
+    hasThumb: false,
+  };
+}
+
 function renderChatPage() {
-  render(
+  return render(
     <MemoryRouter initialEntries={['/chats/10']}>
       <AuthProvider>
         <Routes>
@@ -151,7 +192,10 @@ describe('ChatPage', () => {
       sender: bob,
       content: 'hey @Me look',
       mentions: [me.id],
+      attachments: [],
       createdAt: new Date(1_700_000_003_000).toISOString(),
+      editedAt: null,
+      isDeleted: false,
     };
     stubFetch({ messages: [mentionMsg] });
     renderChatPage();
@@ -175,5 +219,204 @@ describe('ChatPage', () => {
     });
 
     expect(await screen.findByText('Live socket message')).toBeInTheDocument();
+  });
+
+  it('renders an image attachment as a thumbnail and opens the lightbox on click', async () => {
+    const imgMsg: MessageDTO = { ...msg(1, bob, ''), attachments: [imageAttachment(42)] };
+    stubFetch({ messages: [imgMsg] });
+    renderChatPage();
+
+    // The bubble uses the thumbnail variant.
+    const thumb = await screen.findByAltText('photo.jpg');
+    expect(thumb.getAttribute('src')).toBe('/api/attachments/42?thumb=1');
+    expect(thumb.getAttribute('loading')).toBe('lazy');
+
+    await userEvent.click(thumb);
+
+    // The lightbox shows the full (non-thumb) image plus a download link.
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByAltText('photo.jpg').getAttribute('src')).toBe('/api/attachments/42');
+    expect(within(dialog).getByRole('link', { name: /download/i }).getAttribute('href')).toBe(
+      '/api/attachments/42?download=1',
+    );
+
+    // Escape closes it.
+    await userEvent.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('renders a file attachment as a download card with name and size', async () => {
+    const fileMsg: MessageDTO = { ...msg(1, bob, ''), attachments: [fileAttachment(9)] };
+    stubFetch({ messages: [fileMsg] });
+    renderChatPage();
+
+    const name = await screen.findByText('report.pdf');
+    expect(screen.getByText(formatBytes(3_355_443))).toBeInTheDocument();
+    expect(name.closest('a')?.getAttribute('href')).toBe('/api/attachments/9?download=1');
+  });
+
+  it('renders an attachment-only image message without a text bubble', async () => {
+    const imgMsg: MessageDTO = { ...msg(1, bob, ''), attachments: [imageAttachment(42)] };
+    stubFetch({ messages: [imgMsg] });
+    const { container } = renderChatPage();
+
+    const thumb = await screen.findByAltText('photo.jpg');
+    // Bare image (Messenger style): the image is not wrapped in a text bubble,
+    // and no empty gray bubble is rendered anywhere in the thread.
+    expect(thumb.closest('.bg-gray-200')).toBeNull();
+    expect(container.querySelector('.bg-gray-200')).toBeNull();
+  });
+
+  it('renders a deleted message as a "Message deleted" tombstone with no actions menu', async () => {
+    const deleted: MessageDTO = { ...msg(2, me, 'was here'), content: '', isDeleted: true };
+    stubFetch({ messages: [deleted] });
+    renderChatPage();
+
+    expect(await screen.findByText('Message deleted')).toBeInTheDocument();
+    // Tombstones expose no edit/delete affordance, even for my own message.
+    expect(screen.queryByLabelText('Message actions')).not.toBeInTheDocument();
+  });
+
+  it('shows an "(edited)" label next to the timestamp for an edited message', async () => {
+    const edited: MessageDTO = { ...msg(2, me, 'v2'), editedAt: new Date().toISOString() };
+    stubFetch({ messages: [edited] });
+    renderChatPage();
+
+    await screen.findByText('v2');
+    expect(screen.getByText('(edited)')).toBeInTheDocument();
+  });
+
+  it('edit flow: open menu → Edit → banner shows, save PATCHes the new body and updates the bubble', async () => {
+    const fetchMock = stubFetch({
+      messages: [msg(1, bob, 'Hi from Bob'), msg(2, me, 'Original text')],
+      onPatch: (body, id) => ({ ...msg(id, me, body.content), editedAt: new Date().toISOString() }),
+    });
+    renderChatPage();
+
+    await screen.findByText('Original text');
+
+    // Open the actions menu on my own message and pick Edit.
+    await userEvent.click(screen.getByLabelText('Message actions'));
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Edit' }));
+
+    // Banner appears and the input is prefilled with the original text.
+    expect(screen.getByText('Editing message')).toBeInTheDocument();
+    const input = screen.getByPlaceholderText('Aa') as HTMLInputElement;
+    expect(input.value).toBe('Original text');
+
+    await userEvent.clear(input);
+    await userEvent.type(input, 'Edited text');
+    await userEvent.click(screen.getByRole('button', { name: /save edit/i }));
+
+    // PATCH went to the message with just the new content.
+    const patchCall = fetchMock.mock.calls.find(
+      ([i, init]) => i.toString().includes('/messages/2') && init?.method === 'PATCH',
+    );
+    expect(patchCall).toBeDefined();
+    expect(JSON.parse(patchCall?.[1]?.body as string)).toEqual({ content: 'Edited text' });
+
+    // Bubble now shows the edited text and edit mode has exited.
+    expect(await screen.findByText('Edited text')).toBeInTheDocument();
+    expect(screen.queryByText('Editing message')).not.toBeInTheDocument();
+  });
+
+  it('delete flow: confirm → DELETE and the bubble becomes a tombstone', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const fetchMock = stubFetch({ messages: [msg(2, me, 'Delete me')] });
+    renderChatPage();
+
+    await screen.findByText('Delete me');
+
+    await userEvent.click(screen.getByLabelText('Message actions'));
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Delete' }));
+
+    expect(confirmSpy).toHaveBeenCalled();
+    const deleteCall = fetchMock.mock.calls.find(
+      ([i, init]) => i.toString().includes('/messages/2') && init?.method === 'DELETE',
+    );
+    expect(deleteCall).toBeDefined();
+
+    // Optimistic tombstone replaces the bubble.
+    expect(await screen.findByText('Message deleted')).toBeInTheDocument();
+    expect(screen.queryByText('Delete me')).not.toBeInTheDocument();
+    confirmSpy.mockRestore();
+  });
+
+  it('replaces a bubble live when a message:updated (edit) arrives over the socket', async () => {
+    stubFetch({ messages: [msg(7, bob, 'before edit')] });
+    renderChatPage();
+
+    await screen.findByText('before edit');
+
+    act(() => {
+      socket.emit('message:updated', {
+        ...msg(7, bob, 'after edit'),
+        editedAt: new Date().toISOString(),
+      });
+    });
+
+    expect(await screen.findByText('after edit')).toBeInTheDocument();
+    expect(screen.queryByText('before edit')).not.toBeInTheDocument();
+    expect(screen.getByText('(edited)')).toBeInTheDocument();
+  });
+
+  it('turns a bubble into a tombstone live when a message:updated (delete) arrives', async () => {
+    stubFetch({ messages: [msg(7, bob, 'doomed')] });
+    renderChatPage();
+
+    await screen.findByText('doomed');
+
+    act(() => {
+      socket.emit('message:updated', { ...msg(7, bob, ''), content: '', isDeleted: true });
+    });
+
+    expect(await screen.findByText('Message deleted')).toBeInTheDocument();
+    expect(screen.queryByText('doomed')).not.toBeInTheDocument();
+  });
+
+  it('renders an xs read-receipt avatar under the message the other member has read up to', async () => {
+    const bobRead: ChatMemberDTO = { ...bob, lastReadMessageId: 2 }; // newest loaded message
+    stubFetch({
+      messages: [msg(1, bob, 'Hi from Bob'), msg(2, me, 'Hi from me')],
+      chat: { ...dmChat, members: [me, bobRead] },
+    });
+    renderChatPage();
+
+    await screen.findByText('Hi from me');
+
+    // Bob's receipt anchors on message 2 (the newest), rendered as a single xs
+    // avatar with a hover title naming him.
+    const receipt = screen.getByTitle('Bob');
+    expect(receipt).toBeInTheDocument();
+    expect(screen.getAllByTitle('Bob')).toHaveLength(1);
+  });
+
+  it('does not render a receipt for a member who has not read anything yet', async () => {
+    stubFetch({
+      messages: [msg(1, bob, 'Hi from Bob'), msg(2, me, 'Hi from me')],
+      chat: { ...dmChat, members: [me, { ...bob, lastReadMessageId: 0 }] },
+    });
+    renderChatPage();
+
+    await screen.findByText('Hi from me');
+    expect(screen.queryByTitle('Bob')).not.toBeInTheDocument();
+  });
+
+  it('shows the read-receipt avatar live when a read:updated event arrives over the socket', async () => {
+    stubFetch({
+      messages: [msg(1, bob, 'Hi from Bob'), msg(2, me, 'Hi from me')],
+      chat: { ...dmChat, members: [me, { ...bob, lastReadMessageId: 0 }] },
+    });
+    renderChatPage();
+
+    await screen.findByText('Hi from me');
+    expect(screen.queryByTitle('Bob')).not.toBeInTheDocument();
+
+    // Server pushes Bob's advanced read marker — the avatar appears without a refetch.
+    act(() => {
+      socket.emit('read:updated', { chatId: 10, userId: bob.id, lastReadMessageId: 2 });
+    });
+
+    expect(await screen.findByTitle('Bob')).toBeInTheDocument();
   });
 });

@@ -83,6 +83,10 @@ export const messages = sqliteTable(
     createdAt: integer('created_at', { mode: 'timestamp' })
       .notNull()
       .$defaultFn(() => new Date()),
+    /** Set on each edit; null when the message was never edited. */
+    editedAt: integer('edited_at', { mode: 'timestamp' }),
+    /** Set on soft-delete; null while the message is live. Deleted messages serialize as tombstones. */
+    deletedAt: integer('deleted_at', { mode: 'timestamp' }),
   },
   (t) => [index('messages_chat_idx').on(t.chatId, t.id)],
 );
@@ -101,6 +105,36 @@ export const messageMentions = sqliteTable(
     primaryKey({ columns: [t.messageId, t.userId] }),
     index('message_mentions_user_idx').on(t.userId),
   ],
+);
+
+export const attachments = sqliteTable(
+  'attachments',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    chatId: integer('chat_id')
+      .notNull()
+      .references(() => chats.id, { onDelete: 'cascade' }),
+    uploaderId: integer('uploader_id')
+      .notNull()
+      .references(() => users.id),
+    /** Null until a message links this attachment on send; then the owning message. */
+    messageId: integer('message_id').references(() => messages.id),
+    kind: text('kind', { enum: ['image', 'file'] }).notNull(),
+    originalName: text('original_name').notNull(),
+    mimeType: text('mime_type').notNull(),
+    sizeBytes: integer('size_bytes').notNull(),
+    /** Pixel dimensions for images (post-metadata); null for non-images. */
+    width: integer('width'),
+    height: integer('height'),
+    /** Stored filename on the volume (not a full path). */
+    storagePath: text('storage_path').notNull(),
+    /** Stored filename of the ≤512px webp thumbnail; null when none was generated. */
+    thumbPath: text('thumb_path'),
+    createdAt: integer('created_at', { mode: 'timestamp' })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => [index('attachments_message_idx').on(t.messageId)],
 );
 
 export const pushSubscriptions = sqliteTable(
@@ -123,3 +157,4 @@ export const pushSubscriptions = sqliteTable(
 export type UserRow = typeof users.$inferSelect;
 export type ChatRow = typeof chats.$inferSelect;
 export type MessageRow = typeof messages.$inferSelect;
+export type AttachmentRow = typeof attachments.$inferSelect;

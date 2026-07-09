@@ -1,17 +1,24 @@
-import type { ChatSummaryDTO, MessageDTO, MessagesPage } from '@messenger/shared';
-import { and, count, desc, eq, gt, inArray, lt, max, ne } from 'drizzle-orm';
+import type {
+  AttachmentDTO,
+  ChatSummaryDTO,
+  MessageDTO,
+  MessagesPage,
+} from '@messenger/shared';
+import { and, count, desc, eq, gt, inArray, isNull, lt, max, ne } from 'drizzle-orm';
 import type { Db } from '../db/index.js';
 import {
+  attachments,
   chatMembers,
   chats,
   messageMentions,
   messages,
   users,
   type ChatRow,
-  type UserRow,
+  type MessageRow,
 } from '../db/schema.js';
-import { toChatSummaryDTO, toMessageDTO } from '../dto.js';
+import { toAttachmentDTO, toChatSummaryDTO, toMessageDTO, type ChatMemberRow } from '../dto.js';
 import type { ChatEvents } from '../events.js';
+import type { Storage } from '../storage.js';
 
 /** Default and hard-cap page sizes for message history. */
 export const DEFAULT_MESSAGE_LIMIT = 50;
@@ -46,59 +53,256 @@ export function getMemberIds(db: Db, chatId: number): number[] {
     .map((r) => r.userId);
 }
 
-/** Params for {@link createMessage}. `content` is expected pre-validated (trimmed, 1-4000 chars). */
+/** Params for {@link createMessage}. `content` is expected pre-validated (trimmed, ≤4000 chars). */
 export interface CreateMessageParams {
   chatId: number;
   senderId: number;
   content: string;
   mentions?: number[];
+  /** Ids of attachments already uploaded to this chat, to link onto the new message. */
+  attachmentIds?: number[];
 }
+
+/**
+ * Outcome of {@link createMessage}: a discriminated union so routes can map each
+ * failure to the right status without a second query. `not-member` → 404 (covers
+ * "chat doesn't exist" and "not a member" alike); `invalid-attachments` → 400.
+ */
+export type CreateMessageResult =
+  | { ok: true; message: MessageDTO }
+  | { ok: false; reason: 'not-member' | 'invalid-attachments' };
 
 /**
  * The single message-creation path, shared by the human REST endpoint
  * (routes/chats.ts) and the bot API (routes/bot-api.ts): persists the message,
- * filters mentions down to actual chat members, bumps the sender's own
- * `lastReadMessageId` (they've obviously read their own message), and emits
- * `message:new` on the shared bus for sockets/push/webhooks to relay.
+ * filters mentions down to actual chat members, links any uploaded attachments,
+ * bumps the sender's own `lastReadMessageId` (they've obviously read their own
+ * message), and emits `message:new` on the shared bus for sockets/push/webhooks.
  *
- * Returns `null` when `senderId` isn't a member of `chatId` (covers both "chat
- * doesn't exist" and "not a member") — callers turn that into a 404, keeping
- * bots and humans behind the same "member-only" rule.
+ * The persist + attachment-link happen inside a single (synchronous, better-
+ * sqlite3) transaction so a message never lands half-linked.
  */
 export function createMessage(
   db: Db,
   events: ChatEvents,
-  { chatId, senderId, content, mentions }: CreateMessageParams,
-): MessageDTO | null {
+  { chatId, senderId, content, mentions, attachmentIds }: CreateMessageParams,
+): CreateMessageResult {
   const chat = getChatForMember(db, chatId, senderId);
-  if (!chat) return null;
+  if (!chat) return { ok: false, reason: 'not-member' };
   const sender = db.select().from(users).where(eq(users.id, senderId)).get();
-  if (!sender) return null;
+  if (!sender) return { ok: false, reason: 'not-member' };
 
   const memberIds = getMemberIds(db, chat.id);
   const memberSet = new Set(memberIds);
   // Silently drop mentions of non-members and duplicates.
   const dedupedMentions = [...new Set(mentions ?? [])].filter((id) => memberSet.has(id));
 
-  const message = db
-    .insert(messages)
-    .values({ chatId: chat.id, senderId: sender.id, content })
-    .returning()
-    .get();
-  if (dedupedMentions.length > 0) {
-    db.insert(messageMentions)
-      .values(dedupedMentions.map((userId) => ({ messageId: message.id, userId })))
-      .run();
+  // Validate every attachment: it must exist, belong to this chat, have been
+  // uploaded by the sender, and still be unlinked. Any violation fails the whole
+  // send (a distinguishable result the routes turn into a 400).
+  const attachmentIdList = [...new Set(attachmentIds ?? [])];
+  let attachmentRows: (typeof attachments.$inferSelect)[] = [];
+  if (attachmentIdList.length > 0) {
+    attachmentRows = db
+      .select()
+      .from(attachments)
+      .where(inArray(attachments.id, attachmentIdList))
+      .all();
+    if (attachmentRows.length !== attachmentIdList.length) {
+      return { ok: false, reason: 'invalid-attachments' };
+    }
+    for (const a of attachmentRows) {
+      if (a.chatId !== chat.id || a.uploaderId !== sender.id || a.messageId !== null) {
+        return { ok: false, reason: 'invalid-attachments' };
+      }
+    }
   }
-  // The sender has obviously read their own message.
-  db.update(chatMembers)
-    .set({ lastReadMessageId: message.id })
-    .where(and(eq(chatMembers.chatId, chat.id), eq(chatMembers.userId, sender.id)))
-    .run();
 
-  const dto = toMessageDTO(message, sender, dedupedMentions);
+  const message = db.transaction((tx) => {
+    const msg = tx
+      .insert(messages)
+      .values({ chatId: chat.id, senderId: sender.id, content })
+      .returning()
+      .get();
+    if (dedupedMentions.length > 0) {
+      tx.insert(messageMentions)
+        .values(dedupedMentions.map((userId) => ({ messageId: msg.id, userId })))
+        .run();
+    }
+    if (attachmentIdList.length > 0) {
+      tx.update(attachments)
+        .set({ messageId: msg.id })
+        .where(inArray(attachments.id, attachmentIdList))
+        .run();
+    }
+    // The sender has obviously read their own message.
+    tx.update(chatMembers)
+      .set({ lastReadMessageId: msg.id })
+      .where(and(eq(chatMembers.chatId, chat.id), eq(chatMembers.userId, sender.id)))
+      .run();
+    return msg;
+  });
+
+  // Preserve the caller's attachment order in the DTO.
+  const rowById = new Map(attachmentRows.map((r) => [r.id, r]));
+  const attachmentDTOs = attachmentIdList.map((id) => toAttachmentDTO(rowById.get(id)!));
+
+  const dto = toMessageDTO(message, sender, dedupedMentions, attachmentDTOs);
   events.emit('message:new', { message: dto, chat, memberIds });
-  return dto;
+  return { ok: true, message: dto };
+}
+
+/**
+ * Shared access check for the own-message edit/delete endpoints. Ordered so a
+ * non-member can never learn whether a message exists: membership first (→
+ * `not-member`, a 404 'Chat not found'), then existence-in-this-chat (→
+ * `not-found`, a 404 'Message not found'), then ownership (→ `forbidden`, 403).
+ */
+type MessageAccess =
+  | { ok: true; message: MessageRow; chat: ChatRow; memberIds: number[] }
+  | { ok: false; reason: 'not-member' | 'not-found' | 'forbidden' };
+
+function accessOwnMessage(
+  db: Db,
+  chatId: number,
+  messageId: number,
+  userId: number,
+): MessageAccess {
+  const chat = getChatForMember(db, chatId, userId);
+  if (!chat) return { ok: false, reason: 'not-member' };
+  const message = db.select().from(messages).where(eq(messages.id, messageId)).get();
+  if (!message || message.chatId !== chat.id) return { ok: false, reason: 'not-found' };
+  if (message.senderId !== userId) return { ok: false, reason: 'forbidden' };
+  return { ok: true, message, chat, memberIds: getMemberIds(db, chat.id) };
+}
+
+/** Params for {@link editMessage}. `content` is expected pre-validated (trimmed, 1–4000 chars). */
+export interface EditMessageParams {
+  chatId: number;
+  messageId: number;
+  userId: number;
+  content: string;
+  mentions?: number[];
+}
+
+/**
+ * Outcome of {@link editMessage}. `deleted` (400) is distinct from the shared
+ * access reasons so a tombstone can't be edited back to life.
+ */
+export type EditMessageResult =
+  | { ok: true; message: MessageDTO }
+  | { ok: false; reason: 'not-member' | 'not-found' | 'forbidden' | 'deleted' };
+
+/**
+ * Edits an own, non-deleted message: rewrites the text, stamps `editedAt`, and
+ * REPLACES the mention rows (re-filtered to current chat members). Attachments
+ * are untouched (not editable) and preserved in the returned DTO. Emits
+ * `message:updated` on the shared bus for the socket relay.
+ */
+export function editMessage(
+  db: Db,
+  events: ChatEvents,
+  { chatId, messageId, userId, content, mentions }: EditMessageParams,
+): EditMessageResult {
+  const access = accessOwnMessage(db, chatId, messageId, userId);
+  if (!access.ok) return access;
+  const { message, chat, memberIds } = access;
+  if (message.deletedAt !== null) return { ok: false, reason: 'deleted' };
+
+  const memberSet = new Set(memberIds);
+  const dedupedMentions = [...new Set(mentions ?? [])].filter((id) => memberSet.has(id));
+
+  const updated = db.transaction((tx) => {
+    const row = tx
+      .update(messages)
+      .set({ content, editedAt: new Date() })
+      .where(eq(messages.id, message.id))
+      .returning()
+      .get();
+    // Mention rows are replaced wholesale so removed @names don't linger.
+    tx.delete(messageMentions).where(eq(messageMentions.messageId, message.id)).run();
+    if (dedupedMentions.length > 0) {
+      tx.insert(messageMentions)
+        .values(dedupedMentions.map((mentionUserId) => ({ messageId: message.id, userId: mentionUserId })))
+        .run();
+    }
+    return row;
+  });
+
+  const sender = db.select().from(users).where(eq(users.id, updated.senderId)).get()!;
+  const attachmentRows = db
+    .select()
+    .from(attachments)
+    .where(eq(attachments.messageId, message.id))
+    .orderBy(attachments.id)
+    .all();
+  const attachmentDTOs = attachmentRows.map((r) => toAttachmentDTO(r));
+
+  const dto = toMessageDTO(updated, sender, dedupedMentions, attachmentDTOs);
+  events.emit('message:updated', { message: dto, chat, memberIds });
+  return { ok: true, message: dto };
+}
+
+/** Params for {@link deleteMessage}. */
+export interface DeleteMessageParams {
+  chatId: number;
+  messageId: number;
+  userId: number;
+}
+
+/** Outcome of {@link deleteMessage}. Deleting an already-deleted message is a success (idempotent). */
+export type DeleteMessageResult =
+  | { ok: true }
+  | { ok: false; reason: 'not-member' | 'not-found' | 'forbidden' };
+
+/**
+ * Soft-deletes an own message: stamps `deletedAt`, drops the message's mention
+ * and attachment rows, and removes each attachment's file + thumb from disk.
+ * Idempotent — deleting an already-deleted message succeeds without re-emitting.
+ * Emits `message:updated` (a tombstone DTO) on a real transition.
+ */
+export function deleteMessage(
+  db: Db,
+  events: ChatEvents,
+  storage: Storage,
+  { chatId, messageId, userId }: DeleteMessageParams,
+): DeleteMessageResult {
+  const access = accessOwnMessage(db, chatId, messageId, userId);
+  if (!access.ok) return access;
+  const { message, chat, memberIds } = access;
+
+  // Already a tombstone: nothing to change, no event.
+  if (message.deletedAt !== null) return { ok: true };
+
+  // Capture the files to unlink before the rows are gone.
+  const attachmentRows = db
+    .select()
+    .from(attachments)
+    .where(eq(attachments.messageId, message.id))
+    .all();
+
+  const updated = db.transaction((tx) => {
+    const row = tx
+      .update(messages)
+      .set({ deletedAt: new Date() })
+      .where(eq(messages.id, message.id))
+      .returning()
+      .get();
+    tx.delete(attachments).where(eq(attachments.messageId, message.id)).run();
+    tx.delete(messageMentions).where(eq(messageMentions.messageId, message.id)).run();
+    return row;
+  });
+
+  // Best-effort file removal, outside the txn (storage.remove tolerates misses).
+  for (const a of attachmentRows) {
+    storage.remove(a.storagePath);
+    if (a.thumbPath) storage.remove(a.thumbPath);
+  }
+
+  const sender = db.select().from(users).where(eq(users.id, updated.senderId)).get()!;
+  const dto = toMessageDTO(updated, sender, [], []);
+  events.emit('message:updated', { message: dto, chat, memberIds });
+  return { ok: true };
 }
 
 /** messageId -> mentioned user ids, for a batch of messages. */
@@ -113,6 +317,25 @@ function loadMentions(db: Db, messageIds: number[]): Map<number, number[]> {
   for (const row of rows) {
     const list = byMessage.get(row.messageId) ?? [];
     list.push(row.userId);
+    byMessage.set(row.messageId, list);
+  }
+  return byMessage;
+}
+
+/** messageId -> attachment DTOs, for a batch of messages (bulk-fetched to avoid N+1). */
+function loadAttachments(db: Db, messageIds: number[]): Map<number, AttachmentDTO[]> {
+  const byMessage = new Map<number, AttachmentDTO[]>();
+  if (messageIds.length === 0) return byMessage;
+  const rows = db
+    .select()
+    .from(attachments)
+    .where(inArray(attachments.messageId, messageIds))
+    .orderBy(attachments.id)
+    .all();
+  for (const row of rows) {
+    if (row.messageId === null) continue;
+    const list = byMessage.get(row.messageId) ?? [];
+    list.push(toAttachmentDTO(row));
     byMessage.set(row.messageId, list);
   }
   return byMessage;
@@ -133,17 +356,21 @@ function buildSummaries(
 
   const chatRows = db.select().from(chats).where(inArray(chats.id, chatIds)).all();
 
-  // All members (as user rows) grouped by chat.
-  const membersByChat = new Map<number, UserRow[]>();
+  // All members (as user rows + their own read position) grouped by chat.
+  const membersByChat = new Map<number, ChatMemberRow[]>();
   const memberRows = db
-    .select({ chatId: chatMembers.chatId, user: users })
+    .select({
+      chatId: chatMembers.chatId,
+      user: users,
+      lastReadMessageId: chatMembers.lastReadMessageId,
+    })
     .from(chatMembers)
     .innerJoin(users, eq(users.id, chatMembers.userId))
     .where(inArray(chatMembers.chatId, chatIds))
     .all();
   for (const row of memberRows) {
     const list = membersByChat.get(row.chatId) ?? [];
-    list.push(row.user);
+    list.push({ user: row.user, lastReadMessageId: row.lastReadMessageId });
     membersByChat.set(row.chatId, list);
   }
 
@@ -161,6 +388,7 @@ function buildSummaries(
   const lastMessageByChat = new Map<number, MessageDTO>();
   if (lastMessageIds.length > 0) {
     const mentionsByMessage = loadMentions(db, lastMessageIds);
+    const attachmentsByMessage = loadAttachments(db, lastMessageIds);
     const msgRows = db
       .select({ message: messages, sender: users })
       .from(messages)
@@ -170,7 +398,12 @@ function buildSummaries(
     for (const row of msgRows) {
       lastMessageByChat.set(
         row.message.chatId,
-        toMessageDTO(row.message, row.sender, mentionsByMessage.get(row.message.id) ?? []),
+        toMessageDTO(
+          row.message,
+          row.sender,
+          mentionsByMessage.get(row.message.id) ?? [],
+          attachmentsByMessage.get(row.message.id) ?? [],
+        ),
       );
     }
   }
@@ -190,6 +423,8 @@ function buildSummaries(
         inArray(messages.chatId, chatIds),
         ne(messages.senderId, userId),
         gt(messages.id, chatMembers.lastReadMessageId),
+        // Deleted messages are tombstones — they never count toward unread.
+        isNull(messages.deletedAt),
       ),
     )
     .groupBy(messages.chatId)
@@ -284,9 +519,16 @@ export function listMessages(
   const pageRows = hasMore ? rows.slice(0, limit) : rows;
   const ascending = [...pageRows].reverse();
 
-  const mentionsByMessage = loadMentions(db, ascending.map((r) => r.message.id));
+  const messageIds = ascending.map((r) => r.message.id);
+  const mentionsByMessage = loadMentions(db, messageIds);
+  const attachmentsByMessage = loadAttachments(db, messageIds);
   const dtos = ascending.map((r) =>
-    toMessageDTO(r.message, r.sender, mentionsByMessage.get(r.message.id) ?? []),
+    toMessageDTO(
+      r.message,
+      r.sender,
+      mentionsByMessage.get(r.message.id) ?? [],
+      attachmentsByMessage.get(r.message.id) ?? [],
+    ),
   );
 
   const oldest = ascending[0]?.message.id ?? null;

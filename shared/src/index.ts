@@ -10,7 +10,28 @@ export interface UserDTO {
   isBot: boolean;
 }
 
+/** A chat member, personalized with their own read position in that chat. */
+export interface ChatMemberDTO extends UserDTO {
+  /** This member's last-read message id in the chat (0 if they've read nothing). */
+  lastReadMessageId: number;
+}
+
 export type ChatType = 'dm' | 'group';
+
+export type AttachmentKind = 'image' | 'file';
+
+export interface AttachmentDTO {
+  id: number;
+  kind: AttachmentKind;
+  originalName: string;
+  mimeType: string;
+  sizeBytes: number;
+  /** Pixel dimensions of the stored image (post-compression); null for non-images. */
+  width: number | null;
+  height: number | null;
+  /** True when a server-generated thumbnail exists (GET /api/attachments/:id?thumb=1). */
+  hasThumb: boolean;
+}
 
 export interface MessageDTO {
   id: number;
@@ -19,8 +40,16 @@ export interface MessageDTO {
   content: string;
   /** User ids @-mentioned in this message. */
   mentions: number[];
+  attachments: AttachmentDTO[];
   /** ISO 8601 */
   createdAt: string;
+  /** ISO 8601 of the last edit, or null when never edited. Always null for tombstones. */
+  editedAt: string | null;
+  /**
+   * True when the message has been deleted. Tombstones are neutered server-side:
+   * `content` is `''`, `mentions` and `attachments` are empty, `editedAt` is null.
+   */
+  isDeleted: boolean;
 }
 
 export interface ChatSummaryDTO {
@@ -28,7 +57,7 @@ export interface ChatSummaryDTO {
   type: ChatType;
   /** Group name; null for DMs (render the other member's name instead). */
   name: string | null;
-  members: UserDTO[];
+  members: ChatMemberDTO[];
   lastMessage: MessageDTO | null;
   unreadCount: number;
 }
@@ -52,6 +81,16 @@ export type CreateChatRequest =
   | { name: string; memberIds: number[] }; // group
 
 export interface SendMessageRequest {
+  /** May be empty when attachmentIds is non-empty. */
+  content: string;
+  mentions?: number[];
+  /** Attachments previously uploaded to this chat, linked to this message on send. */
+  attachmentIds?: number[];
+}
+
+/** PATCH /api/chats/:chatId/messages/:messageId — edit own message text (attachments are not editable). */
+export interface EditMessageRequest {
+  /** Trimmed 1–4000 chars; edits can't be empty. */
   content: string;
   mentions?: number[];
 }
@@ -85,8 +124,12 @@ export interface ApiErrorBody {
 
 export interface ServerToClientEvents {
   'message:new': (message: MessageDTO) => void;
+  /** An existing message was edited or deleted; replace it in place (deleted → tombstone). */
+  'message:updated': (message: MessageDTO) => void;
   'chat:new': (chat: ChatSummaryDTO) => void;
   'chat:updated': (chat: ChatSummaryDTO) => void;
+  /** A member's read marker advanced in a chat (never fires on a no-op/backwards read). */
+  'read:updated': (data: { chatId: number; userId: number; lastReadMessageId: number }) => void;
 }
 
 export interface ClientToServerEvents {

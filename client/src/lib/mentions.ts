@@ -97,6 +97,35 @@ export function extractMentions(text: string, trackedMentions: MentionCandidate[
 }
 
 /**
+ * Recompute mention ids by scanning free text for any member's `@DisplayName` —
+ * used when editing a message, where there's no `picked` list to reconcile
+ * against. Walks the text like {@link splitByMentions}, greedily matching the
+ * longest name at each `@` so `@Al` never matches inside `@Alice`, and reports
+ * each id once in order of appearance. The server re-filters to chat members.
+ */
+export function mentionsFromText(text: string, members: MentionCandidate[]): number[] {
+  const tokens = [...members].sort((a, b) => b.displayName.length - a.displayName.length);
+  const ids: number[] = [];
+  const seen = new Set<number>();
+  let i = 0;
+  while (i < text.length) {
+    if (text.charAt(i) === '@') {
+      const match = tokens.find((t) => text.startsWith(`@${t.displayName}`, i));
+      if (match) {
+        if (!seen.has(match.id)) {
+          seen.add(match.id);
+          ids.push(match.id);
+        }
+        i += match.displayName.length + 1;
+        continue;
+      }
+    }
+    i++;
+  }
+  return ids;
+}
+
+/**
  * Split a message into text/mention segments for rendering. Only the message's
  * ACTUAL mention ids are considered, and longer display names are matched first
  * so a prefix name (`@Al`) never shadows a longer one (`@Alice`).

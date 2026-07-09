@@ -15,6 +15,7 @@ RUN npm run build -w client
 FROM node:24-slim
 ENV NODE_ENV=production
 ENV DATABASE_PATH=/data/messenger.db
+ENV UPLOADS_DIR=/data/uploads
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY shared/package.json shared/

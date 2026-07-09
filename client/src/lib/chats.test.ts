@@ -1,10 +1,36 @@
 import { describe, expect, it } from 'vitest';
-import type { ChatSummaryDTO, MessageDTO, UserDTO } from '@messenger/shared';
-import { chatInitials, chatTitle, mergeMessages, upsertChat } from './chats';
+import type { ChatMemberDTO, ChatSummaryDTO, MessageDTO, UserDTO } from '@messenger/shared';
+import {
+  chatInitials,
+  chatTitle,
+  mergeMessages,
+  readPositions,
+  replaceMessage,
+  tombstone,
+  upsertChat,
+} from './chats';
 
-const ann: UserDTO = { id: 1, email: 'ann@example.com', displayName: 'Ann Smith', isBot: false };
-const bob: UserDTO = { id: 2, email: 'bob@example.com', displayName: 'Bob', isBot: false };
-const carol: UserDTO = { id: 3, email: 'carol@example.com', displayName: 'Carol', isBot: false };
+const ann: ChatMemberDTO = {
+  id: 1,
+  email: 'ann@example.com',
+  displayName: 'Ann Smith',
+  isBot: false,
+  lastReadMessageId: 0,
+};
+const bob: ChatMemberDTO = {
+  id: 2,
+  email: 'bob@example.com',
+  displayName: 'Bob',
+  isBot: false,
+  lastReadMessageId: 0,
+};
+const carol: ChatMemberDTO = {
+  id: 3,
+  email: 'carol@example.com',
+  displayName: 'Carol',
+  isBot: false,
+  lastReadMessageId: 0,
+};
 
 function msg(id: number, sender: UserDTO, content: string): MessageDTO {
   return {
@@ -13,7 +39,10 @@ function msg(id: number, sender: UserDTO, content: string): MessageDTO {
     sender,
     content,
     mentions: [],
+    attachments: [],
     createdAt: new Date(1_700_000_000_000 + id * 1000).toISOString(),
+    editedAt: null,
+    isDeleted: false,
   };
 }
 
@@ -82,6 +111,36 @@ describe('mergeMessages', () => {
   });
 });
 
+describe('replaceMessage', () => {
+  it('replaces a message in place by id', () => {
+    const existing = [msg(1, ann, 'one'), msg(2, bob, 'two')];
+    const updated = { ...msg(2, bob, 'two edited'), editedAt: new Date().toISOString() };
+    const result = replaceMessage(existing, updated);
+    expect(result.map((m) => m.content)).toEqual(['one', 'two edited']);
+    expect(result[1]?.editedAt).not.toBeNull();
+  });
+
+  it('ignores an update for a message not in the list (never inserts it)', () => {
+    const existing = [msg(1, ann, 'one')];
+    const result = replaceMessage(existing, msg(99, bob, 'stray'));
+    // Same reference back — nothing changed.
+    expect(result).toBe(existing);
+  });
+});
+
+describe('tombstone', () => {
+  it('neuters a message into its deleted form, dropping content/mentions/attachments', () => {
+    const original = { ...msg(1, ann, 'secret'), mentions: [2], editedAt: new Date().toISOString() };
+    const dead = tombstone(original);
+    expect(dead.id).toBe(1);
+    expect(dead.isDeleted).toBe(true);
+    expect(dead.content).toBe('');
+    expect(dead.mentions).toEqual([]);
+    expect(dead.attachments).toEqual([]);
+    expect(dead.editedAt).toBeNull();
+  });
+});
+
 describe('upsertChat', () => {
   function chat(id: number, lastMessage: MessageDTO | null, unreadCount = 0): ChatSummaryDTO {
     return { id, type: 'group', name: `Chat ${id}`, members: [ann, bob], lastMessage, unreadCount };
@@ -111,5 +170,51 @@ describe('upsertChat', () => {
     const incoming = chat(3, msg(5, bob, 'c'));
     const result = upsertChat(existing, incoming);
     expect(result.map((c) => c.id)).toEqual([2, 3, 1]);
+  });
+});
+
+describe('readPositions', () => {
+  // Loaded window: oldest id 5, newest id 7.
+  const messages = [msg(5, ann, 'a'), msg(6, bob, 'b'), msg(7, ann, 'c')];
+
+  it('hides a member whose read position is behind the loaded window (off-screen)', () => {
+    const behind: ChatMemberDTO = { ...bob, lastReadMessageId: 3 };
+    const result = readPositions(messages, [ann, behind], ann.id);
+    expect(result.size).toBe(0);
+  });
+
+  it('clamps a member who has read past the newest loaded message onto the newest', () => {
+    const aheadReader: ChatMemberDTO = { ...bob, lastReadMessageId: 999 };
+    const result = readPositions(messages, [ann, aheadReader], ann.id);
+    expect(result.get(7)?.map((m) => m.id)).toEqual([bob.id]);
+    expect(result.size).toBe(1);
+  });
+
+  it('clusters multiple members who read the same amount onto the same anchor message', () => {
+    const reader1: ChatMemberDTO = { ...bob, lastReadMessageId: 6 };
+    const reader2: ChatMemberDTO = { ...carol, lastReadMessageId: 6 };
+    const result = readPositions(messages, [ann, reader1, reader2], ann.id);
+    expect(result.size).toBe(1);
+    expect(new Set(result.get(6)?.map((m) => m.id))).toEqual(new Set([bob.id, carol.id]));
+  });
+
+  it('excludes me from my own receipts, even with a lastReadMessageId set', () => {
+    const me: ChatMemberDTO = { ...ann, lastReadMessageId: 7 };
+    const neverRead: ChatMemberDTO = { ...bob, lastReadMessageId: 0 };
+    const result = readPositions(messages, [me, neverRead], ann.id);
+    // "me" is excluded, and bob (0 = never read anything — also covers bots,
+    // which never call the read endpoint) is hidden too.
+    expect(result.size).toBe(0);
+  });
+
+  it('anchors on the newest loaded message at or below the read id when the exact id is missing', () => {
+    const sparse = [msg(10, ann, 'a'), msg(14, bob, 'b'), msg(20, ann, 'c')];
+    const reader: ChatMemberDTO = { ...bob, lastReadMessageId: 17 }; // between 14 and 20
+    const result = readPositions(sparse, [ann, reader], ann.id);
+    expect([...result.keys()]).toEqual([14]);
+  });
+
+  it('returns an empty map when no messages are loaded', () => {
+    expect(readPositions([], [bob], ann.id).size).toBe(0);
   });
 });

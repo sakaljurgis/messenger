@@ -2,9 +2,11 @@
 
 A proof-of-concept mobile-first PWA messenger: email/password auth, user
 directory, 1:1 and group chats, @mentions with autocomplete, real-time
-delivery over Socket.IO, web push notifications when the app is closed, and
-webhook-based bots. See [PLAN.md](PLAN.md) for the architecture and
-[examples/README.md](examples/README.md) for bots.
+delivery over Socket.IO, web push notifications when the app is closed,
+webhook-based bots, attachments (images with client-side compression + HD
+toggle, server-side thumbnails, lightbox, file downloads), message edit/delete
+with tombstones, and read receipts. See [PLAN.md](PLAN.md) for the
+architecture and [examples/README.md](examples/README.md) for bots.
 
 ## Quick start (dev)
 
@@ -31,7 +33,7 @@ connected — mentions get a "X mentioned you in …" title.
 | Command | What it does |
 |---|---|
 | `npm run dev` | server + client dev servers, concurrently |
-| `npm test` | all workspace tests (130 tests: vitest + supertest + real-socket integration) |
+| `npm test` | all workspace tests (214 tests: vitest + supertest + real-socket integration) |
 | `npm run typecheck` | `tsc --noEmit` in all workspaces |
 | `npm run build` | production client build |
 | `npm run db:generate -w server` | regenerate Drizzle migrations after editing `server/src/db/schema.ts` |
@@ -40,7 +42,8 @@ connected — mentions get a "X mentioned you in …" title.
 
 ```bash
 docker compose up --build
-# app on http://localhost:3001, SQLite persisted in the messenger-data volume
+# app on http://localhost:3001; SQLite + uploaded attachments persisted in the
+# messenger-data volume (/data/messenger.db, /data/uploads)
 ```
 
 Set `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` (and `APP_ORIGIN`) in the
@@ -82,6 +85,7 @@ deep link into the chat) — no build-plugin magic.
 
 ## Known limits (deliberate PoC cuts)
 
-Attachments, message edit/delete, and read receipts are next after the PoC.
 No E2E encryption, no email verification/password reset, single node only
 (in-process socket registry and event bus — fine for one container).
+Attachments are capped at 25MB; SVGs are never rendered inline (download
+only, XSS hygiene); videos upload fine but render as file cards, not players.

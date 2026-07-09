@@ -6,6 +6,8 @@ import {
   DEFAULT_MESSAGE_LIMIT,
   MAX_MESSAGE_LIMIT,
   createMessage,
+  deleteMessage,
+  editMessage,
   getChatForMember,
   getChatSummaryForUser,
   getMemberIds,
@@ -15,20 +17,33 @@ import {
 import type { Db } from '../db/index.js';
 import { chatMembers, chats, users, type ChatRow } from '../db/schema.js';
 import type { ChatEvents } from '../events.js';
+import type { Storage } from '../storage.js';
 
 const dmSchema = z.object({ userId: z.number().int().positive() });
 const groupSchema = z.object({
   name: z.string().trim().min(1).max(100),
   memberIds: z.array(z.number().int().positive()).nonempty(),
 });
-const sendSchema = z.object({
-  content: z.string().trim().min(1).max(4000),
-  mentions: z.array(z.number().int().positive()).optional(),
-});
+const sendSchema = z
+  .object({
+    // Empty/whitespace content is allowed only alongside at least one attachment
+    // (enforced by the refine below); trimming collapses whitespace-only to ''.
+    content: z.string().trim().max(4000).optional().default(''),
+    mentions: z.array(z.number().int().positive()).optional(),
+    attachmentIds: z.array(z.number().int().positive()).optional(),
+  })
+  .refine((d) => d.content.length > 0 || (d.attachmentIds?.length ?? 0) > 0, {
+    message: 'Message content or attachments required',
+  });
 const addMembersSchema = z.object({
   memberIds: z.array(z.number().int().positive()),
 });
 const markReadSchema = z.object({ messageId: z.number().int() });
+// Edits can't be attachment-only-empty: content is required, 1–4000 chars trimmed.
+const editSchema = z.object({
+  content: z.string().trim().min(1).max(4000),
+  mentions: z.array(z.number().int().positive()).optional(),
+});
 
 /** First zod issue message, for the `{ error }` body. */
 function firstIssue(error: z.ZodError): string {
@@ -67,8 +82,9 @@ function parseLimit(raw: unknown): number {
 }
 
 const CHAT_NOT_FOUND = { error: 'Chat not found' };
+const MESSAGE_NOT_FOUND = { error: 'Message not found' };
 
-export function chatsRouter(db: Db, events: ChatEvents): Router {
+export function chatsRouter(db: Db, events: ChatEvents, storage: Storage): Router {
   const router = Router();
 
   // POST /api/chats — create a DM ({ userId }) or a group ({ name, memberIds }).
@@ -210,24 +226,107 @@ export function chatsRouter(db: Db, events: ChatEvents): Router {
       return;
     }
 
-    const message = createMessage(db, events, {
+    const result = createMessage(db, events, {
       chatId,
       senderId: me.id,
       content: parsed.data.content,
       mentions: parsed.data.mentions,
+      attachmentIds: parsed.data.attachmentIds,
     });
-    if (!message) {
+    if (!result.ok) {
+      if (result.reason === 'invalid-attachments') {
+        res.status(400).json({ error: 'Invalid attachments' });
+        return;
+      }
       res.status(404).json(CHAT_NOT_FOUND);
       return;
     }
-    res.status(201).json({ message });
+    res.status(201).json({ message: result.message });
+  });
+
+  // PATCH /api/chats/:id/messages/:messageId — edit an own message's text.
+  router.patch('/:id/messages/:messageId', requireAuth, (req, res) => {
+    const me = req.user!;
+    const chatId = parseId(req.params.id);
+    const messageId = parseId(req.params.messageId);
+    if (chatId === null) {
+      res.status(404).json(CHAT_NOT_FOUND);
+      return;
+    }
+    if (messageId === null) {
+      res.status(404).json(MESSAGE_NOT_FOUND);
+      return;
+    }
+    const parsed = editSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: firstIssue(parsed.error) });
+      return;
+    }
+
+    const result = editMessage(db, events, {
+      chatId,
+      messageId,
+      userId: me.id,
+      content: parsed.data.content,
+      mentions: parsed.data.mentions,
+    });
+    if (!result.ok) {
+      switch (result.reason) {
+        case 'not-member':
+          res.status(404).json(CHAT_NOT_FOUND);
+          return;
+        case 'not-found':
+          res.status(404).json(MESSAGE_NOT_FOUND);
+          return;
+        case 'forbidden':
+          res.status(403).json({ error: 'Not your message' });
+          return;
+        case 'deleted':
+          res.status(400).json({ error: 'Message deleted' });
+          return;
+      }
+    }
+    res.status(200).json({ message: result.message });
+  });
+
+  // DELETE /api/chats/:id/messages/:messageId — soft-delete an own message
+  // (idempotent: a second delete still 204s). Attachment files are removed on delete.
+  router.delete('/:id/messages/:messageId', requireAuth, (req, res) => {
+    const me = req.user!;
+    const chatId = parseId(req.params.id);
+    const messageId = parseId(req.params.messageId);
+    if (chatId === null) {
+      res.status(404).json(CHAT_NOT_FOUND);
+      return;
+    }
+    if (messageId === null) {
+      res.status(404).json(MESSAGE_NOT_FOUND);
+      return;
+    }
+
+    const result = deleteMessage(db, events, storage, { chatId, messageId, userId: me.id });
+    if (!result.ok) {
+      switch (result.reason) {
+        case 'not-member':
+          res.status(404).json(CHAT_NOT_FOUND);
+          return;
+        case 'not-found':
+          res.status(404).json(MESSAGE_NOT_FOUND);
+          return;
+        case 'forbidden':
+          res.status(403).json({ error: 'Not your message' });
+          return;
+      }
+    }
+    res.status(204).end();
   });
 
   // POST /api/chats/:id/read — advance my read marker (never rewinds).
   router.post('/:id/read', requireAuth, (req, res) => {
     const me = req.user!;
     const chatId = parseId(req.params.id);
-    if (chatId === null || !getChatForMember(db, chatId, me.id)) {
+    const chat = chatId === null ? undefined : getChatForMember(db, chatId, me.id);
+    if (!chat) {
       res.status(404).json(CHAT_NOT_FOUND);
       return;
     }
@@ -237,16 +336,27 @@ export function chatsRouter(db: Db, events: ChatEvents): Router {
       return;
     }
     // Only advance: the WHERE clause makes this a max(current, messageId).
-    db.update(chatMembers)
+    const result = db
+      .update(chatMembers)
       .set({ lastReadMessageId: parsed.data.messageId })
       .where(
         and(
-          eq(chatMembers.chatId, chatId),
+          eq(chatMembers.chatId, chat.id),
           eq(chatMembers.userId, me.id),
           lt(chatMembers.lastReadMessageId, parsed.data.messageId),
         ),
       )
       .run();
+    // Emit only on a real advance — a repeat or backwards read is a silent
+    // no-op (no event storm, no spurious client-side receipt animation).
+    if (result.changes > 0) {
+      events.emit('read:updated', {
+        chat,
+        memberIds: getMemberIds(db, chat.id),
+        userId: me.id,
+        lastReadMessageId: parsed.data.messageId,
+      });
+    }
     res.status(204).end();
   });
 

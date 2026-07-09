@@ -107,6 +107,14 @@ export function initSocket(httpServer: http.Server, db: Db, events: ChatEvents):
     }
   });
 
+  // An edit/delete: relay the current DTO (a tombstone when deleted) to every
+  // member so open threads replace the message in place. No push (see push.ts).
+  events.on('message:updated', ({ message, memberIds }) => {
+    for (const id of memberIds) {
+      io.to(`user:${id}`).emit('message:updated', message);
+    }
+  });
+
   // Each member gets a summary personalized to them (their own unread count, the
   // DM's "other member", etc.).
   events.on('chat:new', ({ chat, memberIds }) => {
@@ -120,6 +128,15 @@ export function initSocket(httpServer: http.Server, db: Db, events: ChatEvents):
     for (const id of memberIds) {
       const summary = getChatSummaryForUser(db, chat.id, id);
       if (summary) io.to(`user:${id}`).emit('chat:updated', summary);
+    }
+  });
+
+  // A member's read marker advanced: relay the small (chatId, userId,
+  // lastReadMessageId) delta to every member so open threads can move that
+  // member's read-receipt avatar without a full chat refetch.
+  events.on('read:updated', ({ chat, memberIds, userId, lastReadMessageId }) => {
+    for (const id of memberIds) {
+      io.to(`user:${id}`).emit('read:updated', { chatId: chat.id, userId, lastReadMessageId });
     }
   });
 

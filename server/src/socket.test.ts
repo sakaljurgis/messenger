@@ -178,6 +178,38 @@ describe('Socket.IO real-time', () => {
     );
   });
 
+  it('delivers read:updated to a connected member when another member POSTs /read', async () => {
+    const alice = await register(ctx.app, 'alice@example.com', 'Alice');
+    const bob = await register(ctx.app, 'bob@example.com', 'Bob');
+
+    const dm = await request(ctx.app)
+      .post('/api/chats')
+      .set('Cookie', alice.cookie)
+      .send({ userId: bob.user.id });
+    const chatId = dm.body.chat.id as number;
+
+    const msg = await request(ctx.app)
+      .post(`/api/chats/${chatId}/messages`)
+      .set('Cookie', bob.cookie)
+      .send({ content: 'hi alice' });
+    const messageId = msg.body.message.id as number;
+
+    const bobSocket = connect(bob.cookie);
+    await waitConnect(bobSocket);
+
+    const received = waitFor<{ chatId: number; userId: number; lastReadMessageId: number }>(
+      bobSocket,
+      'read:updated',
+    );
+    await request(ctx.app)
+      .post(`/api/chats/${chatId}/read`)
+      .set('Cookie', alice.cookie)
+      .send({ messageId });
+
+    const payload = await received;
+    expect(payload).toEqual({ chatId, userId: alice.user.id, lastReadMessageId: messageId });
+  });
+
   it('reports presence via isUserConnected: true while connected, false after disconnect', async () => {
     const alice = await register(ctx.app, 'alice@example.com', 'Alice');
     const socket = connect(alice.cookie);

@@ -15,11 +15,17 @@ import type { ChatEvents } from '../events.js';
  * filtering, unread bookkeeping, `message:new` fan-out).
  */
 
-const sendSchema = z.object({
-  chatId: z.number().int().positive(),
-  content: z.string().trim().min(1).max(4000),
-  mentions: z.array(z.number().int().positive()).optional(),
-});
+const sendSchema = z
+  .object({
+    chatId: z.number().int().positive(),
+    // Empty content is allowed only with at least one attachment (see refine).
+    content: z.string().trim().max(4000).optional().default(''),
+    mentions: z.array(z.number().int().positive()).optional(),
+    attachmentIds: z.array(z.number().int().positive()).optional(),
+  })
+  .refine((d) => d.content.length > 0 || (d.attachmentIds?.length ?? 0) > 0, {
+    message: 'Message content or attachments required',
+  });
 
 /** First zod issue message, for the `{ error }` body. */
 function firstIssue(error: z.ZodError): string {
@@ -70,17 +76,22 @@ export function botApiRouter(db: Db, events: ChatEvents): Router {
       return;
     }
 
-    const message = createMessage(db, events, {
+    const result = createMessage(db, events, {
       chatId: parsed.data.chatId,
       senderId: req.bot!.id,
       content: parsed.data.content,
       mentions: parsed.data.mentions,
+      attachmentIds: parsed.data.attachmentIds,
     });
-    if (!message) {
+    if (!result.ok) {
+      if (result.reason === 'invalid-attachments') {
+        res.status(400).json({ error: 'Invalid attachments' });
+        return;
+      }
       res.status(404).json({ error: 'Chat not found' });
       return;
     }
-    res.status(201).json({ message });
+    res.status(201).json({ message: result.message });
   });
 
   return router;

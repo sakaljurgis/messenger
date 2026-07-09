@@ -4,6 +4,7 @@ import {
   filterCandidates,
   findActiveMentionQuery,
   insertMention,
+  mentionsFromText,
   splitByMentions,
   type MentionCandidate,
 } from './mentions';
@@ -79,6 +80,28 @@ describe('extractMentions', () => {
 
   it('dedupes repeated picks of the same member', () => {
     expect(extractMentions('@Alice and @Alice', [alice, alice])).toEqual([2]);
+  });
+});
+
+describe('mentionsFromText', () => {
+  it('collects the ids of every member whose @name appears in the text', () => {
+    expect(mentionsFromText('hi @Alice and @Bob', [alice, bob])).toEqual(
+      expect.arrayContaining([alice.id, bob.id]),
+    );
+    expect(mentionsFromText('hi @Alice and @Bob', [alice, bob])).toHaveLength(2);
+  });
+
+  it('ignores members not mentioned and dedupes repeats', () => {
+    expect(mentionsFromText('@Bob @Bob only', [alice, bob])).toEqual([bob.id]);
+  });
+
+  it('matches the longer name first so @Al does not shadow @Alice', () => {
+    // Only '@Alice' is present; 'Al' must not match the 'Al' inside '@Alice'.
+    expect(mentionsFromText('ping @Alice', [al, alice])).toEqual([alice.id]);
+  });
+
+  it('returns an empty list when nothing matches', () => {
+    expect(mentionsFromText('no tags here', [alice, bob])).toEqual([]);
   });
 });
 

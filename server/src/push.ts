@@ -48,6 +48,22 @@ function truncate(text: string, max = MAX_BODY_CHARS): string {
 }
 
 /**
+ * The notification body: the (truncated) text when present, else an
+ * attachment-derived preview — "📷 Photo"/"📷 N photos" for images, or
+ * "📎 <filename>" for a file. Empty only for the degenerate no-text-no-file case.
+ */
+function previewBody(message: MessageDTO): string {
+  if (message.content.length > 0) return truncate(message.content);
+  const atts = message.attachments;
+  const imageCount = atts.filter((a) => a.kind === 'image').length;
+  if (imageCount > 0) {
+    return imageCount === 1 ? '📷 Photo' : `📷 ${imageCount} photos`;
+  }
+  if (atts.length > 0) return `📎 ${atts[0]!.originalName}`;
+  return '';
+}
+
+/**
  * Pure builder for the notification payload a single recipient should receive.
  * Title rules:
  *   - the recipient is @-mentioned → "<sender> mentioned you in <chat name | 'a chat'>"
@@ -71,7 +87,7 @@ export function buildPushPayload(
   }
   return {
     title,
-    body: truncate(message.content),
+    body: previewBody(message),
     data: { chatId: message.chatId, messageId: message.id },
   };
 }

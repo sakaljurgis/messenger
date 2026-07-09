@@ -1,5 +1,11 @@
-import type { ChatSummaryDTO, MessageDTO, UserDTO } from '@messenger/shared';
-import type { ChatRow, MessageRow, UserRow } from './db/schema.js';
+import type {
+  AttachmentDTO,
+  ChatMemberDTO,
+  ChatSummaryDTO,
+  MessageDTO,
+  UserDTO,
+} from '@messenger/shared';
+import type { AttachmentRow, ChatRow, MessageRow, UserRow } from './db/schema.js';
 
 /**
  * Maps a DB user row to the public API shape. Deliberately omits
@@ -15,32 +21,73 @@ export function toUserDTO(user: UserRow): UserDTO {
 }
 
 /**
- * Maps a message row (+ its resolved sender and mention user ids) to the API shape.
- * `createdAt` is a Date from the drizzle timestamp column → ISO string over the wire.
+ * Maps an attachment row to the public API shape. `hasThumb` collapses the
+ * server-side `thumbPath` into a boolean — the URL is derived by the client
+ * (GET /api/attachments/:id?thumb=1), never the raw storage path.
+ */
+export function toAttachmentDTO(attachment: AttachmentRow): AttachmentDTO {
+  return {
+    id: attachment.id,
+    kind: attachment.kind,
+    originalName: attachment.originalName,
+    mimeType: attachment.mimeType,
+    sizeBytes: attachment.sizeBytes,
+    width: attachment.width,
+    height: attachment.height,
+    hasThumb: attachment.thumbPath != null,
+  };
+}
+
+/**
+ * Maps a message row (+ its resolved sender, mention user ids and attachments)
+ * to the API shape. `createdAt` is a Date from the drizzle timestamp column →
+ * ISO string over the wire. `attachments` defaults to empty for plain messages.
+ *
+ * Deleted messages serialize as a tombstone: the original text, mentions and
+ * attachments are dropped (`content: ''`, both lists empty, `editedAt: null`) so
+ * a deleted message can never leak its former contents over the API.
  */
 export function toMessageDTO(
   message: MessageRow,
   sender: UserRow,
   mentions: number[],
+  attachments: AttachmentDTO[] = [],
 ): MessageDTO {
+  const isDeleted = message.deletedAt !== null;
   return {
     id: message.id,
     chatId: message.chatId,
     sender: toUserDTO(sender),
-    content: message.content,
-    mentions,
+    content: isDeleted ? '' : message.content,
+    mentions: isDeleted ? [] : mentions,
+    attachments: isDeleted ? [] : attachments,
     createdAt: message.createdAt.toISOString(),
+    editedAt: isDeleted || message.editedAt === null ? null : message.editedAt.toISOString(),
+    isDeleted,
   };
+}
+
+/** A chat member row (+ their own read position) as loaded by the chats service. */
+export interface ChatMemberRow {
+  user: UserRow;
+  lastReadMessageId: number;
+}
+
+/** Maps a member row to the public API shape: the user fields plus their read position. */
+export function toChatMemberDTO(member: ChatMemberRow): ChatMemberDTO {
+  return { ...toUserDTO(member.user), lastReadMessageId: member.lastReadMessageId };
 }
 
 /**
  * Assembles a chat summary personalized for the requesting user. `members` are all
- * members (incl. the requester); `lastMessage`/`unreadCount` are precomputed by the
- * chats service to keep this mapper pure.
+ * members (incl. the requester), each carrying their own `lastReadMessageId` (this
+ * is what powers read-receipt rendering — everyone's read position, not just the
+ * requester's); `lastMessage`/`unreadCount` are precomputed by the chats service to
+ * keep this mapper pure.
  */
 export function toChatSummaryDTO(
   chat: ChatRow,
-  members: UserRow[],
+  members: ChatMemberRow[],
   lastMessage: MessageDTO | null,
   unreadCount: number,
 ): ChatSummaryDTO {
@@ -48,7 +95,7 @@ export function toChatSummaryDTO(
     id: chat.id,
     type: chat.type,
     name: chat.name,
-    members: members.map(toUserDTO),
+    members: members.map(toChatMemberDTO),
     lastMessage,
     unreadCount,
   };

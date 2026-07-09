@@ -1,6 +1,7 @@
 import { avatarHue, chatInitials } from '../lib/chats';
 
 const sizeClasses = {
+  xs: 'h-4 w-4 text-[8px]',
   sm: 'h-8 w-8 text-xs',
   md: 'h-10 w-10 text-sm',
   lg: 'h-12 w-12 text-base',
