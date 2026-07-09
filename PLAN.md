@@ -53,8 +53,13 @@ sessions           token, user_id, expires_at
 chats              id, type ('dm'|'group'), name (null for dm), dm_key (unique,
                    "minUserId:maxUserId", null for groups), created_by, created_at
 chat_members       chat_id, user_id, joined_at, last_read_message_id   [PK: chat_id+user_id]
-messages           id, chat_id, sender_id, content, created_at
+messages           id, chat_id, sender_id, content, created_at,
+                   edited_at?, deleted_at? (soft delete → tombstone)
 message_mentions   message_id, user_id
+attachments        id, chat_id, uploader_id, message_id? (null until linked
+                   on send), kind ('image'|'file'), original_name, mime_type,
+                   size_bytes, width?, height?, storage_path, thumb_path?,
+                   created_at — bytes live on disk under UPLOADS_DIR
 push_subscriptions id, user_id, endpoint (unique), p256dh, auth, created_at
 ```
 
@@ -78,9 +83,15 @@ GET    /api/chats                my chats + last message + unread count
 POST   /api/chats                { userId } → DM (idempotent via dm_key)
                                  { name, memberIds } → group
 PATCH  /api/chats/:id/members    add members to a group
+GET    /api/chats/:id            single chat summary (member-only)
 GET    /api/chats/:id/messages   cursor-paginated, newest first
-POST   /api/chats/:id/messages   { content, mentions?: userId[] }
-POST   /api/chats/:id/read       mark read up to message id
+POST   /api/chats/:id/messages   { content, mentions?, attachmentIds? }
+PATCH  /api/chats/:id/messages/:mid   edit own message { content, mentions? }
+DELETE /api/chats/:id/messages/:mid   soft-delete own message (tombstone)
+POST   /api/chats/:id/read       mark read up to message id (emits read:updated)
+
+POST   /api/chats/:id/attachments    multipart upload → attachment id (25MB cap)
+GET    /api/attachments/:id          stream (?thumb=1 webp, ?download=1 disposition)
 
 POST   /api/push/subscribe       store PushSubscription
 DELETE /api/push/subscribe
@@ -102,9 +113,13 @@ one and the send path exists exactly once.
 - Handshake middleware authenticates via the session cookie.
 - On connect, the socket joins `user:{id}`; all fan-out targets user rooms
   (covers chats created after connect and multi-tab for free).
-- Server → client events: `message:new`, `chat:new`, `chat:updated`.
-- Client → server: `typing` (stretch goal).
-- Track connected user ids in memory to decide who gets web push instead.
+- Server → client events: `message:new`, `message:updated` (edit/delete),
+  `chat:new`, `chat:updated`, `read:updated`, `typing`, `presence`,
+  `presence:state` (snapshot on connect).
+- Client → server: `typing` (throttled to 1/2s; membership-checked relay).
+- Presence: online broadcast on first connect, offline debounced 5s (reload
+  doesn't flicker). The refcounted registry stays real-time for push
+  targeting (`isUserConnected`).
 
 ## Push notifications
 
@@ -189,12 +204,14 @@ Each phase ends in a working, demoable state.
       member) via a `read:updated` socket event; mini avatars at each member's
       read position in groups, "Seen" in DMs.
 
-## Deliberate PoC cuts
+## Deliberate cuts (still out of scope)
 
-No E2E encryption, no message editing/deletion, no attachments/images, no read
-receipts (beyond unread counts), no rate limiting beyond the basics, no email
-verification/password reset, single-node only (in-memory socket registry —
-fine for one container).
+No E2E encryption, no rate limiting beyond the basics, no email
+verification/password reset, single-node only (in-memory socket registry and
+event bus — fine for one container). Attachments capped at 25MB; SVG is
+download-only (XSS hygiene); video uploads render as file cards, not players.
+(Attachments, edit/delete, and read receipts were originally cut from the PoC
+but landed in post-PoC iteration 1; typing/presence landed in phase 7.)
 
 ## Phase 6 implementation notes
 
