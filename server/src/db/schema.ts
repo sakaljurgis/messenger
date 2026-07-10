@@ -124,8 +124,42 @@ export const messages = sqliteTable(
      * no URL exists, or when the fetch failed.
      */
     linkPreview: text('link_preview'),
+    /**
+     * JSON-serialized MessageActionDTO[] — bot-sent action buttons; null for
+     * human messages and for bot messages without actions.
+     */
+    actions: text('actions'),
   },
   (t) => [index('messages_chat_idx').on(t.chatId, t.id)],
+);
+
+/**
+ * Send-later queue: a boot+interval dispatcher sends due rows through the
+ * normal createMessage flow (so sockets/push/webhooks fan out) and deletes
+ * them. Text-only by design — attachments can't be scheduled. `replyToId`
+ * has no FK: the target may be hard-deleted (chat teardown) before dispatch;
+ * the dispatcher re-validates and drops a stale reference to a plain send.
+ */
+export const scheduledMessages = sqliteTable(
+  'scheduled_messages',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    chatId: integer('chat_id')
+      .notNull()
+      .references(() => chats.id, { onDelete: 'cascade' }),
+    senderId: integer('sender_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    content: text('content').notNull(),
+    /** JSON number[] of mentioned user ids. */
+    mentions: text('mentions').notNull().default('[]'),
+    replyToId: integer('reply_to_id'),
+    scheduledAt: integer('scheduled_at', { mode: 'timestamp' }).notNull(),
+    createdAt: integer('created_at', { mode: 'timestamp' })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => [index('scheduled_messages_due_idx').on(t.scheduledAt)],
 );
 
 export const messageMentions = sqliteTable(

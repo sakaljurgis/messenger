@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
-import type { MessageDTO } from '@messenger/shared';
-import type { ChatRow } from './db/schema.js';
+import type { MessageDTO, UserDTO } from '@messenger/shared';
+import type { ChatRow, UserRow } from './db/schema.js';
 
 /**
  * Fan-out event bus. Phase 2 (this file's REST routes) emits domain events after
@@ -61,12 +61,29 @@ export interface ReadUpdatedEvent {
   lastReadMessageId: number;
 }
 
+/**
+ * A member tapped an action button on a BOT message (see routes/chats.ts
+ * `POST .../actions`). The webhook subscriber POSTs an action callback to the
+ * bot's `webhookUrl`; nothing else listens (it never touches sockets/push).
+ * `bot` is the still-alive bot that sent the actions message — guaranteed
+ * `isBot`, not soft-deleted, and with a `webhookUrl` (the route rejects
+ * otherwise); `message` is that message's current DTO, `user` the tapper.
+ */
+export interface ActionTriggeredEvent {
+  bot: UserRow;
+  actionId: string;
+  message: MessageDTO;
+  user: UserDTO;
+  chat: ChatRow;
+}
+
 interface EventMap {
   'message:new': [MessageNewEvent];
   'message:updated': [MessageUpdatedEvent];
   'chat:new': [ChatNewEvent];
   'chat:updated': [ChatUpdatedEvent];
   'read:updated': [ReadUpdatedEvent];
+  'action:triggered': [ActionTriggeredEvent];
 }
 
 /** Typed facade over a plain node EventEmitter — only the known events exist. */

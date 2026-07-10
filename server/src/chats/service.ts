@@ -1,6 +1,7 @@
 import type {
   AttachmentDTO,
   ChatSummaryDTO,
+  MessageActionDTO,
   MessageDTO,
   MessagesPage,
   ReactionGroupDTO,
@@ -22,10 +23,12 @@ import {
   type UserRow,
 } from '../db/schema.js';
 import {
+  parseActions,
   toAttachmentDTO,
   toChatSummaryDTO,
   toMessageDTO,
   toReplyToDTO,
+  toUserDTO,
   type ChatMemberRow,
 } from '../dto.js';
 import type { ChatEvents } from '../events.js';
@@ -81,6 +84,14 @@ export interface CreateMessageParams {
    * in the same chat, else the whole send fails with `invalid-reply`.
    */
   replyToId?: number;
+  /**
+   * Bot action buttons to attach to the message (bot senders ONLY — silently
+   * ignored for a human sender, keeping "bot messages only" true at the single
+   * write path). Expected pre-validated by the caller (routes/bot-api.ts: ≤6,
+   * ids/labels within the DTO limits, unique ids). Persisted verbatim as JSON
+   * into `messages.actions`; the DTO re-parses it (see dto#parseActions).
+   */
+  actions?: MessageActionDTO[];
 }
 
 /**
@@ -106,12 +117,19 @@ export type CreateMessageResult =
 export function createMessage(
   db: Db,
   events: ChatEvents,
-  { chatId, senderId, content, mentions, attachmentIds, replyToId }: CreateMessageParams,
+  { chatId, senderId, content, mentions, attachmentIds, replyToId, actions }: CreateMessageParams,
 ): CreateMessageResult {
   const chat = getChatForMember(db, chatId, senderId);
   if (!chat) return { ok: false, reason: 'not-member' };
   const sender = db.select().from(users).where(eq(users.id, senderId)).get();
   if (!sender) return { ok: false, reason: 'not-member' };
+
+  // Action buttons are a bot-only affordance (contract: "bot messages only").
+  // A non-bot sender never gets actions persisted even if a caller passes some,
+  // so the invariant holds at this single write path — the human REST route
+  // simply never forwards the field.
+  const actionsJson =
+    sender.isBot && actions && actions.length > 0 ? JSON.stringify(actions) : null;
 
   // Reply target (if any): must exist, live in THIS chat, and not be a tombstone.
   let replyTarget: MessageRow | undefined;
@@ -151,7 +169,13 @@ export function createMessage(
   const message = db.transaction((tx) => {
     const msg = tx
       .insert(messages)
-      .values({ chatId: chat.id, senderId: sender.id, content, replyToId: replyToId ?? null })
+      .values({
+        chatId: chat.id,
+        senderId: sender.id,
+        content,
+        replyToId: replyToId ?? null,
+        actions: actionsJson,
+      })
       .returning()
       .get();
     if (dedupedMentions.length > 0) {
@@ -420,6 +444,77 @@ export function toggleReaction(
   const dto = messageDTOFromRow(db, message);
   events.emit('message:updated', { message: dto, chat, memberIds });
   return { ok: true, message: dto };
+}
+
+/** Params for {@link triggerAction}. `actionId` is expected pre-validated (non-empty, ≤64). */
+export interface TriggerActionParams {
+  chatId: number;
+  messageId: number;
+  userId: number;
+  actionId: string;
+}
+
+/**
+ * Outcome of {@link triggerAction}. The reasons map to distinct statuses (see
+ * routes/chats.ts): `not-member`→404 (no existence leak), `not-found`→404,
+ * `deleted`→400 (a tombstone dropped its actions), `unknown-action`→404 (the
+ * message doesn't carry that actionId — also covers non-bot / no-action
+ * messages, whose `actions` column is null), `bot-unavailable`→400 (the sender
+ * is not a live bot with a webhook, so nothing could receive the callback).
+ */
+export type TriggerActionResult =
+  | { ok: true }
+  | {
+      ok: false;
+      reason: 'not-member' | 'not-found' | 'deleted' | 'unknown-action' | 'bot-unavailable';
+    };
+
+/**
+ * Handles a tap on a bot message's action button: validates that the caller is
+ * a member, the message lives in this chat and isn't a tombstone, it actually
+ * carries the tapped `actionId`, and it was sent by a still-alive bot with a
+ * `webhookUrl`. On success emits `action:triggered` on the shared bus (the
+ * webhook subscriber POSTs the callback to the bot, fire-and-forget) and
+ * returns `{ ok: true }` — the route replies 204 immediately without waiting on
+ * delivery. No message is written; this is a pure fan-out trigger.
+ */
+export function triggerAction(
+  db: Db,
+  events: ChatEvents,
+  { chatId, messageId, userId, actionId }: TriggerActionParams,
+): TriggerActionResult {
+  const chat = getChatForMember(db, chatId, userId);
+  if (!chat) return { ok: false, reason: 'not-member' };
+
+  const message = db.select().from(messages).where(eq(messages.id, messageId)).get();
+  if (!message || message.chatId !== chat.id) return { ok: false, reason: 'not-found' };
+  if (message.deletedAt !== null) return { ok: false, reason: 'deleted' };
+
+  // The message must actually carry the tapped action. A tombstone was already
+  // rejected above; a human/no-action message has a null `actions` column, so
+  // parseActions yields undefined and any actionId is "unknown".
+  const action = parseActions(message.actions)?.find((a) => a.id === actionId);
+  if (!action) return { ok: false, reason: 'unknown-action' };
+
+  // Deliverable only when the sender is a bot that still exists and has a
+  // webhook — a since-deleted bot (deletedAt set, apiToken revoked) or a bot
+  // that never had a webhookUrl can't receive the callback.
+  const sender = db.select().from(users).where(eq(users.id, message.senderId)).get();
+  if (!sender || !sender.isBot || sender.deletedAt !== null || !sender.webhookUrl) {
+    return { ok: false, reason: 'bot-unavailable' };
+  }
+
+  const tapper = db.select().from(users).where(eq(users.id, userId)).get();
+  if (!tapper) return { ok: false, reason: 'not-member' };
+
+  events.emit('action:triggered', {
+    bot: sender,
+    actionId,
+    message: messageDTOFromRow(db, message),
+    user: toUserDTO(tapper),
+    chat,
+  });
+  return { ok: true };
 }
 
 /** messageId -> mentioned user ids, for a batch of messages. */

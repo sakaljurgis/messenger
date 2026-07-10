@@ -20,6 +20,7 @@ import type {
   UserDTO,
 } from '@messenger/shared';
 import { ApiError, apiDelete, apiGet, apiPatch, apiPost } from './api';
+import { setAppBadge } from './badge';
 import { getSocket } from './socket';
 
 const PAGE_LIMIT = 30;
@@ -531,6 +532,16 @@ export function useChats(): UseChatsResult {
   // read:updated deliberately has no listener here: the chat list doesn't render
   // per-member read receipts (that's ChatPage's job via useChat below), and its
   // own unread count already comes from `unreadCount` on the summary.
+
+  // App icon badge: mirror the total unread count on every change to `chats`
+  // (initial fetch, chat:new/chat:updated upserts, message-driven refetches,
+  // mark-read refreshes). KNOWN LIMITATION: this hook only runs while the chat
+  // list page (or another subscriber) is mounted, so while the user sits
+  // inside a single chat the badge can lag until they return to the list or
+  // the app otherwise refetches — acceptable for v1; not worth a global store.
+  useEffect(() => {
+    setAppBadge(chats.reduce((total, chat) => total + chat.unreadCount, 0));
+  }, [chats]);
 
   return { chats, loading, error, refresh: () => void load() };
 }

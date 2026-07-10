@@ -25,6 +25,11 @@
 // handler checks the header, then calls back into POST /api/bot/messages
 // (Bearer-authenticated with the same token) to send the reply. No loop risk:
 // the server never webhooks a bot about its own message.
+//
+// This bot also demos interactive ACTION BUTTONS: every echo reply carries two
+// buttons. The same webhookUrl receives an { type: 'action', ... } payload when
+// a member taps one (the message payload has no `type` field), and the bot
+// replies naming the tapped button.
 
 import http from 'node:http';
 
@@ -43,11 +48,13 @@ async function readJson(req) {
   return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
 }
 
-async function reply(chatId, content) {
+// `actions` is optional (≤6 buttons: { id ≤64, label ≤40, style? 'primary'|'danger' }).
+// When omitted it's dropped from the JSON — a plain text message.
+async function reply(chatId, content, actions) {
   const res = await fetch(`${MESSENGER_URL}/api/bot/messages`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${BOT_TOKEN}` },
-    body: JSON.stringify({ chatId, content }),
+    body: JSON.stringify({ chatId, content, actions }),
   });
   if (!res.ok) {
     console.error(`[echo-bot] reply failed: ${res.status} ${await res.text()}`);
@@ -69,11 +76,22 @@ const server = http.createServer((req, res) => {
   res.writeHead(200).end();
 
   readJson(req)
-    .then(({ message, chat }) => {
+    .then((payload) => {
+      // An action button was tapped (only this kind of payload carries `type`).
+      if (payload.type === 'action') {
+        const { action, user, chatId } = payload;
+        console.log(`[echo-bot] ${user.displayName} tapped "${action.id}"`);
+        return reply(chatId, `You tapped: ${action.id}`);
+      }
+      // Otherwise it's a new message — echo it back with two demo buttons.
+      const { message, chat } = payload;
       console.log(
         `[echo-bot] ${message.sender.displayName} in chat ${chat.id}: ${message.content}`,
       );
-      return reply(chat.id, `Echo: ${message.content}`);
+      return reply(chat.id, `Echo: ${message.content}`, [
+        { id: 'like', label: '👍 Like', style: 'primary' },
+        { id: 'nope', label: '👎 Nope', style: 'danger' },
+      ]);
     })
     .catch((err) => console.error('[echo-bot] failed to handle webhook:', err));
 });

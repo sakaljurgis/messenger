@@ -9,8 +9,15 @@ import {
   type FormEvent,
   type KeyboardEvent,
 } from 'react';
-import type { AttachmentDTO, MessageDTO, UserDTO } from '@messenger/shared';
+import type {
+  AttachmentDTO,
+  MessageDTO,
+  ScheduleMessageRequest,
+  ScheduledMessageDTO,
+  UserDTO,
+} from '@messenger/shared';
 import Avatar from './Avatar';
+import { apiDelete, apiGet, apiPost } from '../lib/api';
 import { getSocket } from '../lib/socket';
 import { compressImage, shouldCompress, uploadAttachment } from '../lib/attachments';
 import {
@@ -179,6 +186,40 @@ function RemoveIcon() {
   );
 }
 
+function ClockIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+      <circle cx="12" cy="12" r="9" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M12 7v5l3.5 2" />
+    </svg>
+  );
+}
+
+/** Compact human label for a scheduled time (e.g. "Mon 08:00 PM"). */
+function formatScheduleTime(date: Date): string {
+  return date.toLocaleString(undefined, {
+    weekday: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+/** Today at 20:00, or tomorrow at 20:00 if 20:00 has already passed. */
+function eveningTarget(): Date {
+  const d = new Date(Date.now());
+  d.setHours(20, 0, 0, 0);
+  if (d.getTime() <= Date.now()) d.setDate(d.getDate() + 1);
+  return d;
+}
+
+/** Tomorrow at 09:00. */
+function tomorrowMorningTarget(): Date {
+  const d = new Date(Date.now());
+  d.setDate(d.getDate() + 1);
+  d.setHours(9, 0, 0, 0);
+  return d;
+}
+
 function MicIcon() {
   return (
     <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
@@ -308,6 +349,16 @@ export default function Composer({
   const [pending, setPending] = useState<PendingAttachment[]>([]);
   const [hd, setHd] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+  // Send-later ("schedule") UI. `scheduleOpen` toggles the quick-pick popover;
+  // `scheduleCustom` holds the datetime-local value; `scheduledNotice` is the
+  // brief "Scheduled for …" confirmation (auto-hidden). `scheduled` is MY pending
+  // queue for this chat (fetched on mount/chat change), expandable to cancel rows.
+  const [scheduleOpen, setScheduleOpen] = useState(false);
+  const [scheduleCustom, setScheduleCustom] = useState('');
+  const [scheduledNotice, setScheduledNotice] = useState<string | null>(null);
+  const [scheduled, setScheduled] = useState<ScheduledMessageDTO[]>([]);
+  const [scheduledExpanded, setScheduledExpanded] = useState(false);
+  const noticeTimerRef = useRef<number | null>(null);
   // Voice recording. `recording` drives the recording-bar UI; `recordSeconds`
   // ticks the elapsed-time label. The MediaRecorder/stream/chunks live in refs
   // (never in render state) so unmount/chat-switch cleanup can reach them.
@@ -347,6 +398,13 @@ export default function Composer({
   const canSend = isEditing
     ? trimmed.length > 0 && !disabled
     : (trimmed.length > 0 || doneCount > 0) && !uploading && !disabled;
+
+  // Send-later is offered only for a non-empty, non-editing text message. The
+  // scheduled queue is text-only server-side (attachments can't be scheduled),
+  // so with files staged the clock is shown DISABLED with an explanatory title
+  // rather than silently dropping the attachments.
+  const showSchedule = !isEditing && trimmed.length > 0;
+  const scheduleDisabled = disabled || pending.length > 0;
 
   // Voice recording needs both getUserMedia and MediaRecorder; when either is
   // missing (older/locked-down browsers, jsdom) the mic button is hidden
@@ -454,6 +512,110 @@ export default function Composer({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatId]);
+
+  // Load MY pending scheduled messages for this chat on mount / chat switch. The
+  // popover, expanded list, and confirmation notice all reset for the new chat.
+  // Failures are non-critical (the queue is a convenience) and swallowed.
+  useEffect(() => {
+    let ignore = false;
+    setScheduled([]);
+    setScheduleOpen(false);
+    setScheduleCustom('');
+    setScheduledExpanded(false);
+    setScheduledNotice(null);
+    apiGet<{ scheduled: ScheduledMessageDTO[] }>(`/api/chats/${chatId}/scheduled`)
+      .then((res) => {
+        if (!ignore) setScheduled(res.scheduled);
+      })
+      .catch(() => {
+        // ignore — a missing queue must never break composing
+      });
+    return () => {
+      ignore = true;
+    };
+  }, [chatId]);
+
+  // Clear the auto-hide timer for the "Scheduled for …" notice on unmount.
+  useEffect(() => {
+    return () => {
+      if (noticeTimerRef.current !== null) window.clearTimeout(noticeTimerRef.current);
+    };
+  }, []);
+
+  /** Show the transient "Scheduled for …" confirmation, auto-hiding after ~3s. */
+  function showScheduledNotice(message: string) {
+    setScheduledNotice(message);
+    if (noticeTimerRef.current !== null) window.clearTimeout(noticeTimerRef.current);
+    noticeTimerRef.current = window.setTimeout(() => setScheduledNotice(null), 3000);
+  }
+
+  /** Re-pull the pending queue after a schedule/cancel (keeps the count honest). */
+  async function refreshScheduled() {
+    try {
+      const res = await apiGet<{ scheduled: ScheduledMessageDTO[] }>(
+        `/api/chats/${chatId}/scheduled`,
+      );
+      setScheduled(res.scheduled);
+    } catch {
+      // ignore
+    }
+  }
+
+  /**
+   * Queue the current composer content to send at `when`. On success the composer
+   * clears exactly like a live send (text/mention/draft) and a confirmation shows;
+   * on rejection the content is retained and the error surfaces in the banner.
+   */
+  async function scheduleFor(when: Date) {
+    if (isEditing) return;
+    const content = trimmed;
+    if (content.length === 0 || pending.length > 0) return;
+
+    setScheduleOpen(false);
+    setScheduleCustom('');
+    setSendError(null);
+
+    const body: ScheduleMessageRequest = {
+      content,
+      mentions: extractMentions(content, picked.current),
+      scheduledAt: when.toISOString(),
+    };
+    if (replyingTo) body.replyToId = replyingTo.id;
+
+    try {
+      await apiPost(`/api/chats/${chatId}/scheduled`, body);
+    } catch (err) {
+      setSendError(err instanceof Error ? err.message : 'Failed to schedule message');
+      return;
+    }
+
+    // Clear the composer the same way a successful send does (no attachments here).
+    setText('');
+    setMention(null);
+    picked.current = [];
+    clearDraft(chatId);
+    onCancelReply?.();
+    showScheduledNotice(`Scheduled for ${formatScheduleTime(when)}`);
+    void refreshScheduled();
+  }
+
+  /** Confirm the custom datetime-local pick (ignored if empty/unparseable). */
+  function confirmCustomSchedule() {
+    if (!scheduleCustom) return;
+    const when = new Date(scheduleCustom);
+    if (Number.isNaN(when.getTime())) return;
+    void scheduleFor(when);
+  }
+
+  /** Cancel one pending scheduled message (optimistically removed on success). */
+  async function cancelScheduled(id: number) {
+    try {
+      await apiDelete(`/api/chats/${chatId}/scheduled/${id}`);
+      setScheduled((prev) => prev.filter((s) => s.id !== id));
+    } catch (err) {
+      setSendError(err instanceof Error ? err.message : 'Failed to cancel scheduled message');
+    }
+  }
 
   /** Kick off (or restart) the compress-then-upload pipeline for one pending item. */
   function startUpload(item: PendingAttachment) {
@@ -876,6 +1038,16 @@ export default function Composer({
         </div>
       )}
 
+      {scheduledNotice && (
+        <div
+          role="status"
+          className="flex items-center gap-2 rounded-lg bg-green-50 px-3 py-1.5 text-sm text-green-700 dark:bg-green-500/10 dark:text-green-300"
+        >
+          <ClockIcon />
+          <span className="min-w-0 truncate">{scheduledNotice}</span>
+        </div>
+      )}
+
       {mention && (
         <ul
           role="listbox"
@@ -911,6 +1083,96 @@ export default function Composer({
               onRetry={() => retryPending(item.localId)}
             />
           ))}
+        </div>
+      )}
+
+      {scheduled.length > 0 && (
+        <div className="flex flex-col rounded-lg bg-gray-100 text-sm dark:bg-gray-700">
+          <button
+            type="button"
+            onClick={() => setScheduledExpanded((v) => !v)}
+            aria-expanded={scheduledExpanded}
+            className="flex items-center gap-2 px-3 py-1.5 text-left font-medium text-gray-600 dark:text-gray-300"
+          >
+            <ClockIcon />
+            <span className="flex-1">
+              {scheduled.length} scheduled message{scheduled.length === 1 ? '' : 's'}
+            </span>
+            <span className="text-xs text-gray-400">{scheduledExpanded ? 'Hide' : 'Show'}</span>
+          </button>
+          {scheduledExpanded && (
+            <ul aria-label="Scheduled messages" className="border-t border-gray-200 dark:border-gray-600">
+              {scheduled.map((s) => (
+                <li key={s.id} className="flex items-center gap-2 px-3 py-1.5">
+                  <span className="w-24 flex-shrink-0 text-xs text-gray-500 dark:text-gray-400">
+                    {formatScheduleTime(new Date(s.scheduledAt))}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-gray-700 dark:text-gray-200">
+                    {s.content}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => void cancelScheduled(s.id)}
+                    aria-label={`Cancel scheduled message: ${s.content}`}
+                    className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full text-gray-500 transition-colors hover:bg-gray-200 dark:text-gray-400 dark:hover:bg-gray-600"
+                  >
+                    <RemoveIcon />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
+      {scheduleOpen && (
+        <div
+          role="dialog"
+          aria-label="Schedule message"
+          className="absolute bottom-full right-2 mb-2 w-60 rounded-xl border border-gray-200 bg-white p-2 shadow-lg dark:border-gray-700 dark:bg-gray-800"
+        >
+          <div className="flex flex-col gap-1">
+            <button
+              type="button"
+              onClick={() => void scheduleFor(new Date(Date.now() + 60 * 60 * 1000))}
+              className="rounded-lg px-3 py-2 text-left text-sm text-gray-900 transition-colors hover:bg-gray-100 dark:text-gray-100 dark:hover:bg-gray-700"
+            >
+              In 1 hour
+            </button>
+            <button
+              type="button"
+              onClick={() => void scheduleFor(eveningTarget())}
+              className="rounded-lg px-3 py-2 text-left text-sm text-gray-900 transition-colors hover:bg-gray-100 dark:text-gray-100 dark:hover:bg-gray-700"
+            >
+              {eveningTarget().toDateString() === new Date(Date.now()).toDateString()
+                ? 'This evening, 20:00'
+                : 'Tomorrow, 20:00'}
+            </button>
+            <button
+              type="button"
+              onClick={() => void scheduleFor(tomorrowMorningTarget())}
+              className="rounded-lg px-3 py-2 text-left text-sm text-gray-900 transition-colors hover:bg-gray-100 dark:text-gray-100 dark:hover:bg-gray-700"
+            >
+              Tomorrow, 09:00
+            </button>
+          </div>
+          <div className="mt-2 flex items-center gap-1 border-t border-gray-200 pt-2 dark:border-gray-700">
+            <input
+              type="datetime-local"
+              aria-label="Custom schedule time"
+              value={scheduleCustom}
+              onChange={(e) => setScheduleCustom(e.target.value)}
+              className="min-w-0 flex-1 rounded-lg bg-gray-100 px-2 py-1.5 text-sm text-gray-900 focus:outline-none dark:bg-gray-700 dark:text-gray-100"
+            />
+            <button
+              type="button"
+              onClick={confirmCustomSchedule}
+              disabled={!scheduleCustom}
+              className="flex-shrink-0 rounded-lg bg-[#0084ff] px-3 py-1.5 text-sm font-medium text-white transition-opacity disabled:opacity-40"
+            >
+              Set
+            </button>
+          </div>
         </div>
       )}
 
@@ -1017,6 +1279,23 @@ export default function Composer({
           style={{ maxHeight: MAX_TEXTAREA_HEIGHT }}
           className="min-w-0 flex-1 resize-none overflow-y-auto rounded-2xl bg-gray-100 px-4 py-2.5 text-gray-900 focus:outline-none disabled:opacity-60 dark:bg-gray-700 dark:text-gray-100 dark:placeholder:text-gray-400"
         />
+        {showSchedule && (
+          <button
+            type="button"
+            onClick={() => setScheduleOpen((v) => !v)}
+            disabled={scheduleDisabled}
+            aria-label="Schedule message"
+            aria-expanded={scheduleOpen}
+            title={
+              pending.length > 0
+                ? "Attachments can't be scheduled — send them with the message instead"
+                : 'Schedule for later'
+            }
+            className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full text-gray-500 transition-colors hover:bg-gray-100 disabled:opacity-40 dark:text-gray-400 dark:hover:bg-gray-700"
+          >
+            <ClockIcon />
+          </button>
+        )}
         <button
           type="submit"
           disabled={!canSend}

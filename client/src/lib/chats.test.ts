@@ -1,6 +1,42 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import type { ChatMemberDTO, ChatSummaryDTO, MessageDTO, UserDTO } from '@messenger/shared';
 import { ApiError } from './api';
+
+// Controllable stand-in for the Socket.IO client so the useChats badge-effect
+// tests below can drive server events synchronously (see presence.test.ts /
+// ChatListPage.test.tsx for the same pattern). Declared via vi.hoisted so it's
+// available inside the hoisted vi.mock factory.
+const socket = vi.hoisted(() => {
+  const listeners: Record<string, Array<(...a: unknown[]) => void>> = {};
+  const s = {
+    connected: false,
+    on(event: string, fn: (...a: unknown[]) => void) {
+      (listeners[event] ??= []).push(fn);
+      return s;
+    },
+    off(event: string, fn: (...a: unknown[]) => void) {
+      listeners[event] = (listeners[event] ?? []).filter((f) => f !== fn);
+      return s;
+    },
+    emit(event: string, ...args: unknown[]) {
+      for (const fn of [...(listeners[event] ?? [])]) fn(...args);
+      return true;
+    },
+    listenerCount(event: string) {
+      return (listeners[event] ?? []).length;
+    },
+    clear() {
+      for (const key of Object.keys(listeners)) delete listeners[key];
+    },
+  };
+  return s;
+});
+
+vi.mock('./socket', () => ({
+  getSocket: () => socket,
+}));
+
 import {
   chatInitials,
   chatTitle,
@@ -18,6 +54,7 @@ import {
   searchTerms,
   tombstone,
   upsertChat,
+  useChats,
   type OutboxItem,
 } from './chats';
 
@@ -391,5 +428,77 @@ describe('searchSnippet', () => {
     expect(snippet.startsWith('…')).toBe(true);
     expect(snippet.endsWith('…')).toBe(true);
     expect(snippet.length).toBeLessThan(long.length);
+  });
+});
+
+describe('useChats badge effect', () => {
+  function jsonResponse(status: number, body: unknown): Response {
+    return { ok: status >= 200 && status < 300, status, json: async () => body } as unknown as Response;
+  }
+
+  function stubChats(chats: ChatSummaryDTO[]) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse(200, { chats })),
+    );
+  }
+
+  function chatSummary(id: number, unreadCount: number): ChatSummaryDTO {
+    return { id, type: 'group', name: `Chat ${id}`, members: [ann, bob], lastMessage: null, unreadCount };
+  }
+
+  /** Emit a server event only once useChats has actually subscribed — an event
+   *  fired before the effect registers its listener is silently lost. */
+  async function emitFromServer(event: string, ...args: unknown[]) {
+    await waitFor(() => expect(socket.listenerCount(event)).toBeGreaterThan(0));
+    act(() => {
+      socket.emit(event, ...args);
+    });
+  }
+
+  const setAppBadgeMock = vi.fn().mockResolvedValue(undefined);
+  const clearAppBadgeMock = vi.fn().mockResolvedValue(undefined);
+
+  beforeEach(() => {
+    socket.clear();
+    setAppBadgeMock.mockClear();
+    clearAppBadgeMock.mockClear();
+    Object.defineProperty(navigator, 'setAppBadge', { configurable: true, value: setAppBadgeMock });
+    Object.defineProperty(navigator, 'clearAppBadge', { configurable: true, value: clearAppBadgeMock });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    Reflect.deleteProperty(navigator, 'setAppBadge');
+    Reflect.deleteProperty(navigator, 'clearAppBadge');
+  });
+
+  it('sets the app badge to the sum of unreadCount across chats on initial load', async () => {
+    // Before the fetch resolves `chats` starts as [] (total 0, so the badge
+    // briefly clears) — the assertion below only cares about the settled value.
+    stubChats([chatSummary(1, 2), chatSummary(2, 3)]);
+    renderHook(() => useChats());
+
+    await waitFor(() => expect(setAppBadgeMock).toHaveBeenCalledWith(5));
+  });
+
+  it('recomputes the total when a live chat:updated changes a chat unreadCount', async () => {
+    stubChats([chatSummary(1, 2), chatSummary(2, 3)]);
+    renderHook(() => useChats());
+    await waitFor(() => expect(setAppBadgeMock).toHaveBeenCalledWith(5));
+
+    await emitFromServer('chat:updated', chatSummary(1, 7));
+
+    await waitFor(() => expect(setAppBadgeMock).toHaveBeenCalledWith(10));
+  });
+
+  it('clears the app badge once every chat is read', async () => {
+    stubChats([chatSummary(1, 1)]);
+    renderHook(() => useChats());
+    await waitFor(() => expect(setAppBadgeMock).toHaveBeenCalledWith(1));
+
+    await emitFromServer('chat:updated', chatSummary(1, 0));
+
+    await waitFor(() => expect(clearAppBadgeMock).toHaveBeenCalled());
   });
 });

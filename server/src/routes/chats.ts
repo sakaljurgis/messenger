@@ -17,6 +17,7 @@ import {
   listMessagesAfter,
   listMessagesAround,
   toggleReaction,
+  triggerAction,
 } from '../chats/service.js';
 import type { Db } from '../db/index.js';
 import { attachments, chatMembers, chats, users, type ChatRow } from '../db/schema.js';
@@ -55,6 +56,9 @@ const editSchema = z.object({
 });
 // The emoji whitelist is enforced against REACTION_EMOJIS in the handler.
 const reactionSchema = z.object({ emoji: z.string() });
+// Tapping a bot action button; the id must match one on the message (checked in
+// triggerAction). Same ≤64 bound as the bot-side action id.
+const triggerActionSchema = z.object({ actionId: z.string().min(1).max(64) });
 
 /** First zod issue message, for the `{ error }` body. */
 function firstIssue(error: z.ZodError): string {
@@ -402,6 +406,57 @@ export function chatsRouter(db: Db, events: ChatEvents, storage: Storage): Route
       }
     }
     res.status(200).json({ message: result.message });
+  });
+
+  // POST /api/chats/:id/messages/:messageId/actions — tap a bot action button.
+  // Any member may tap; the message must live in this chat, not be a tombstone,
+  // carry the given actionId, and have been sent by a still-alive bot with a
+  // webhook. On success the callback is dispatched to the bot fire-and-forget
+  // (via the shared bus / webhooks) and we 204 immediately.
+  router.post('/:id/messages/:messageId/actions', requireAuth, (req, res) => {
+    const me = req.user!;
+    const chatId = parseId(req.params.id);
+    const messageId = parseId(req.params.messageId);
+    if (chatId === null) {
+      res.status(404).json(CHAT_NOT_FOUND);
+      return;
+    }
+    if (messageId === null) {
+      res.status(404).json(MESSAGE_NOT_FOUND);
+      return;
+    }
+    const parsed = triggerActionSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: firstIssue(parsed.error) });
+      return;
+    }
+
+    const result = triggerAction(db, events, {
+      chatId,
+      messageId,
+      userId: me.id,
+      actionId: parsed.data.actionId,
+    });
+    if (!result.ok) {
+      switch (result.reason) {
+        case 'not-member':
+          res.status(404).json(CHAT_NOT_FOUND);
+          return;
+        case 'not-found':
+          res.status(404).json(MESSAGE_NOT_FOUND);
+          return;
+        case 'deleted':
+          res.status(400).json({ error: 'Message deleted' });
+          return;
+        case 'unknown-action':
+          res.status(404).json({ error: 'Action not found' });
+          return;
+        case 'bot-unavailable':
+          res.status(400).json({ error: 'Bot unavailable' });
+          return;
+      }
+    }
+    res.status(204).end();
   });
 
   // POST /api/chats/:id/read — advance my read marker (never rewinds).

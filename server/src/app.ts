@@ -10,6 +10,7 @@ import { botApiRouter } from './routes/bot-api.js';
 import { botsRouter } from './routes/bots.js';
 import { chatsRouter } from './routes/chats.js';
 import { pushRouter } from './routes/push.js';
+import { scheduledRouter } from './routes/scheduled.js';
 import { searchRouter } from './routes/search.js';
 import { usersRouter } from './routes/users.js';
 import { createStorage, type Storage } from './storage.js';
@@ -59,6 +60,9 @@ export function createApp(
   app.use('/api/auth', authRouter(db));
   app.use('/api/users', usersRouter(db));
   app.use('/api/chats', chatsRouter(db, events, storage));
+  // Send-later queue: owns /api/chats/:id/scheduled (a path the chats router
+  // above never matches, so mount order between the two is unambiguous).
+  app.use('/api/chats', scheduledRouter(db));
   app.use('/api/push', pushRouter(db));
   app.use('/api/bots', botsRouter(db, events));
   app.use('/api/bot', botApiRouter(db, events));

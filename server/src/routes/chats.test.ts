@@ -1,10 +1,19 @@
-import type { ChatSummaryDTO, MessageDTO, MessagesPage, UserDTO } from '@messenger/shared';
+import type {
+  ChatSummaryDTO,
+  MessageActionDTO,
+  MessageDTO,
+  MessagesPage,
+  UserDTO,
+} from '@messenger/shared';
+import { eq } from 'drizzle-orm';
 import request from 'supertest';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../app.js';
-import { createDb } from '../db/index.js';
+import { createDb, type Db } from '../db/index.js';
+import { messages } from '../db/schema.js';
 import {
   createChatEvents,
+  type ActionTriggeredEvent,
   type ChatEvents,
   type ChatNewEvent,
   type ChatUpdatedEvent,
@@ -766,5 +775,209 @@ describe('event bus fan-out', () => {
     await alice.agent.post('/api/chats').send({ userId: bob.user.id }); // created
     await alice.agent.post('/api/chats').send({ userId: bob.user.id }); // existing
     expect(chatNew).toHaveLength(1);
+  });
+});
+
+/** Create a bot owned by `actor`, returning its DTO + one-time apiToken. */
+async function createBot(actor: Actor, name: string, webhookUrl?: string) {
+  const res = await actor.agent.post('/api/bots').send({ name, webhookUrl });
+  return { bot: res.body.bot as UserDTO, apiToken: res.body.apiToken as string };
+}
+
+/** Send a message as the bot (inbound API), returning the created MessageDTO. */
+async function botSend(
+  app: App,
+  apiToken: string,
+  chatId: number,
+  content: string,
+  actions?: MessageActionDTO[],
+): Promise<MessageDTO> {
+  const res = await request(app)
+    .post('/api/bot/messages')
+    .set('Authorization', `Bearer ${apiToken}`)
+    .send({ chatId, content, actions });
+  return res.body.message as MessageDTO;
+}
+
+describe('POST /api/chats/:id/messages — human send ignores actions', () => {
+  it('drops an actions field from a human client (message has no actions)', async () => {
+    const app = makeApp();
+    const alice = await register(app, 'alice@example.com', 'Alice');
+    const bob = await register(app, 'bob@example.com', 'Bob');
+    const chatId = (await alice.agent.post('/api/chats').send({ userId: bob.user.id })).body.chat
+      .id as number;
+
+    const res = await alice.agent
+      .post(`/api/chats/${chatId}/messages`)
+      .send({ content: 'sneaky buttons', actions: [{ id: 'x', label: 'X', style: 'primary' }] });
+    // Accepted (old clients shouldn't break) but the actions are simply ignored.
+    expect(res.status).toBe(201);
+    expect((res.body.message as MessageDTO).actions).toBeUndefined();
+
+    // And nothing was persisted onto the row either.
+    const page = await alice.agent.get(`/api/chats/${chatId}/messages`);
+    expect((page.body.messages as MessageDTO[]).at(-1)!.actions).toBeUndefined();
+  });
+});
+
+describe('POST /api/chats/:id/messages/:messageId/actions — tap a bot action', () => {
+  let db: Db;
+  let app: App;
+  let events: ChatEvents;
+  let alice: Actor;
+  let bob: Actor;
+  let groupId: number;
+  let bot: UserDTO;
+  let apiToken: string;
+  let actionMsg: MessageDTO;
+
+  beforeEach(async () => {
+    db = createDb(':memory:');
+    events = createChatEvents();
+    app = createApp(db, events);
+    alice = await register(app, 'alice@example.com', 'Alice');
+    bob = await register(app, 'bob@example.com', 'Bob');
+    ({ bot, apiToken } = await createBot(alice, 'Echo Bot', 'https://bot.example.com/webhook'));
+    groupId = (
+      await alice.agent.post('/api/chats').send({ name: 'Team', memberIds: [bob.user.id, bot.id] })
+    ).body.chat.id as number;
+    actionMsg = await botSend(app, apiToken, groupId, 'Pick one:', [
+      { id: 'yes', label: 'Yes', style: 'primary' },
+      { id: 'no', label: 'No', style: 'danger' },
+    ]);
+  });
+
+  it('204s and emits action:triggered with the actionId, tapper, and message', async () => {
+    const triggered: ActionTriggeredEvent[] = [];
+    events.on('action:triggered', (e) => triggered.push(e));
+
+    const res = await alice.agent
+      .post(`/api/chats/${groupId}/messages/${actionMsg.id}/actions`)
+      .send({ actionId: 'yes' });
+    expect(res.status).toBe(204);
+
+    expect(triggered).toHaveLength(1);
+    expect(triggered[0]!.actionId).toBe('yes');
+    expect(triggered[0]!.user.id).toBe(alice.user.id);
+    expect(triggered[0]!.message.id).toBe(actionMsg.id);
+    expect(triggered[0]!.bot.id).toBe(bot.id);
+    expect(triggered[0]!.chat.id).toBe(groupId);
+  });
+
+  it('lets any member (not just the message recipient) tap', async () => {
+    const res = await bob.agent
+      .post(`/api/chats/${groupId}/messages/${actionMsg.id}/actions`)
+      .send({ actionId: 'no' });
+    expect(res.status).toBe(204);
+  });
+
+  it('404s for a non-member (no existence leak) and emits nothing', async () => {
+    const mallory = await register(app, 'mallory@example.com', 'Mallory');
+    const triggered: ActionTriggeredEvent[] = [];
+    events.on('action:triggered', (e) => triggered.push(e));
+
+    const res = await mallory.agent
+      .post(`/api/chats/${groupId}/messages/${actionMsg.id}/actions`)
+      .send({ actionId: 'yes' });
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Chat not found');
+    expect(triggered).toHaveLength(0);
+  });
+
+  it('404s (Chat not found) for an unknown chat id', async () => {
+    const res = await alice.agent
+      .post(`/api/chats/999999/messages/${actionMsg.id}/actions`)
+      .send({ actionId: 'yes' });
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Chat not found');
+  });
+
+  it('404s (Message not found) when the message is in another chat', async () => {
+    const otherId = (await alice.agent.post('/api/chats').send({ userId: bob.user.id })).body.chat
+      .id as number;
+    const res = await alice.agent
+      .post(`/api/chats/${otherId}/messages/${actionMsg.id}/actions`)
+      .send({ actionId: 'yes' });
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Message not found');
+  });
+
+  it('404s (Action not found) for an actionId the message does not carry', async () => {
+    const res = await alice.agent
+      .post(`/api/chats/${groupId}/messages/${actionMsg.id}/actions`)
+      .send({ actionId: 'maybe' });
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Action not found');
+  });
+
+  it('404s (Action not found) when tapping a human message (no actions)', async () => {
+    const human = await send(alice, groupId, 'just text');
+    const res = await alice.agent
+      .post(`/api/chats/${groupId}/messages/${human.body.message.id}/actions`)
+      .send({ actionId: 'yes' });
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Action not found');
+  });
+
+  it('400s (Message deleted) once the bot message is a tombstone — actions are dropped', async () => {
+    // Bots can't delete via the human endpoint (and have no session), so tombstone
+    // the row directly to model a delete; the DTO then drops its actions and the
+    // tap must reject before dispatching.
+    db.update(messages)
+      .set({ deletedAt: new Date() })
+      .where(eq(messages.id, actionMsg.id))
+      .run();
+    const triggered: ActionTriggeredEvent[] = [];
+    events.on('action:triggered', (e) => triggered.push(e));
+
+    const res = await alice.agent
+      .post(`/api/chats/${groupId}/messages/${actionMsg.id}/actions`)
+      .send({ actionId: 'yes' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Message deleted');
+    expect(triggered).toHaveLength(0);
+
+    // The tombstone also serializes without actions over the wire.
+    const page = await alice.agent.get(`/api/chats/${groupId}/messages`);
+    const tomb = (page.body.messages as MessageDTO[]).find((m) => m.id === actionMsg.id)!;
+    expect(tomb.isDeleted).toBe(true);
+    expect(tomb.actions).toBeUndefined();
+  });
+
+  it('400s on an invalid body (empty actionId)', async () => {
+    const res = await alice.agent
+      .post(`/api/chats/${groupId}/messages/${actionMsg.id}/actions`)
+      .send({ actionId: '' });
+    expect(res.status).toBe(400);
+  });
+
+  it('400s (Bot unavailable) when the sending bot was deleted (deletedAt set)', async () => {
+    // Soft-delete the bot (revokes its token, removes memberships) — its old
+    // action message survives but the callback can no longer be delivered.
+    await alice.agent.delete(`/api/bots/${bot.id}`);
+    const res = await alice.agent
+      .post(`/api/chats/${groupId}/messages/${actionMsg.id}/actions`)
+      .send({ actionId: 'yes' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Bot unavailable');
+  });
+
+  it('400s (Bot unavailable) when the sending bot has no webhookUrl', async () => {
+    const { bot: silent, apiToken: silentToken } = await createBot(alice, 'Silent Bot');
+    await alice.agent.patch(`/api/chats/${groupId}/members`).send({ memberIds: [silent.id] });
+    const silentMsg = await botSend(app, silentToken, groupId, 'Pick:', [{ id: 'ok', label: 'OK' }]);
+
+    const res = await alice.agent
+      .post(`/api/chats/${groupId}/messages/${silentMsg.id}/actions`)
+      .send({ actionId: 'ok' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Bot unavailable');
+  });
+
+  it('requires authentication', async () => {
+    const res = await request(app)
+      .post(`/api/chats/${groupId}/messages/${actionMsg.id}/actions`)
+      .send({ actionId: 'yes' });
+    expect(res.status).toBe(401);
   });
 });

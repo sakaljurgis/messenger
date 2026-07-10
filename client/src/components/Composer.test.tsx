@@ -1,7 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { AttachmentDTO, MessageDTO, UserDTO } from '@messenger/shared';
+import type {
+  AttachmentDTO,
+  MessageDTO,
+  ScheduleMessageRequest,
+  ScheduledMessageDTO,
+  UserDTO,
+} from '@messenger/shared';
 import Composer from './Composer';
 import { compressImage, shouldCompress, uploadAttachment } from '../lib/attachments';
 
@@ -810,5 +816,210 @@ describe('Composer paste and drop', () => {
     // Non-image → uploaded without compression, just like the file picker.
     expect(compressImage).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.getByRole('button', { name: /send/i })).not.toBeDisabled());
+  });
+});
+
+describe('Composer scheduling (send later)', () => {
+  /** Build a scheduled-message DTO for the pending-queue list. */
+  function scheduledDto(over: Partial<ScheduledMessageDTO> = {}): ScheduledMessageDTO {
+    return {
+      id: 1,
+      chatId: 10,
+      content: 'queued text',
+      mentions: [],
+      replyToId: null,
+      scheduledAt: new Date('2026-07-11T20:00:00Z').toISOString(),
+      createdAt: new Date('2026-07-10T10:00:00Z').toISOString(),
+      ...over,
+    };
+  }
+
+  let fetchMock: Mock;
+  let postId = 100;
+
+  /** Install a controllable global fetch for the api layer (apiGet/apiPost/apiDelete). */
+  function installFetch(opts: { initial?: ScheduledMessageDTO[]; postFails?: boolean } = {}) {
+    let store = [...(opts.initial ?? [])];
+    fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      const method = init?.method ?? 'GET';
+      if (method === 'GET') {
+        return new Response(JSON.stringify({ scheduled: store }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (method === 'POST') {
+        if (opts.postFails) {
+          return new Response(JSON.stringify({ error: 'Scheduled time must be in the future' }), {
+            status: 400,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        const body = JSON.parse(String(init?.body)) as ScheduleMessageRequest;
+        const dto = scheduledDto({ id: ++postId, content: body.content, scheduledAt: body.scheduledAt });
+        store = [...store, dto];
+        return new Response(JSON.stringify({ scheduled: dto }), {
+          status: 201,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      // DELETE
+      const id = Number(url.split('/').pop());
+      store = store.filter((s) => s.id !== id);
+      return new Response(null, { status: 204 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+  }
+
+  /** The most recent POST call's parsed request body. */
+  function lastPostBody(): ScheduleMessageRequest {
+    const call = [...fetchMock.mock.calls].reverse().find(([, init]) => init?.method === 'POST')!;
+    return JSON.parse(String((call[1] as RequestInit).body)) as ScheduleMessageRequest;
+  }
+
+  beforeEach(() => {
+    installFetch();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('hides the clock until there is non-empty text and outside edit mode', async () => {
+    const { rerender } = render(<Composer onSend={vi.fn()} members={[me]} meId={me.id} chatId={10} />);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled()); // mount fetch settled
+
+    // No text → no clock.
+    expect(screen.queryByRole('button', { name: /schedule message/i })).not.toBeInTheDocument();
+
+    // Typing reveals it.
+    await userEvent.type(screen.getByPlaceholderText('Aa'), 'later please');
+    expect(screen.getByRole('button', { name: /schedule message/i })).toBeInTheDocument();
+
+    // Edit mode never offers scheduling, even with text.
+    const editing: MessageDTO = {
+      id: 5,
+      chatId: 10,
+      sender: me,
+      content: 'edit me',
+      mentions: [],
+      attachments: [],
+      reactions: [],
+      replyTo: null,
+      createdAt: new Date('2026-07-10T10:00:00Z').toISOString(),
+      editedAt: null,
+      isDeleted: false,
+    };
+    rerender(
+      <Composer
+        onSend={vi.fn()}
+        members={[me]}
+        meId={me.id}
+        chatId={10}
+        editing={editing}
+        onEditSubmit={vi.fn()}
+        onCancelEdit={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole('button', { name: /schedule message/i })).not.toBeInTheDocument();
+  });
+
+  it('POSTs a quick-option schedule with the composer content + computed time', async () => {
+    const nowMs = Date.parse('2026-07-10T10:00:00Z');
+    vi.spyOn(Date, 'now').mockReturnValue(nowMs);
+    render(<Composer onSend={vi.fn()} members={[me, alice]} meId={me.id} chatId={10} />);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+
+    await userEvent.type(screen.getByPlaceholderText('Aa'), 'ping in an hour');
+    await userEvent.click(screen.getByRole('button', { name: /schedule message/i }));
+    await userEvent.click(screen.getByRole('button', { name: 'In 1 hour' }));
+
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'POST')).toBe(true),
+    );
+    expect(lastPostBody()).toEqual({
+      content: 'ping in an hour',
+      mentions: [],
+      scheduledAt: new Date(nowMs + 60 * 60 * 1000).toISOString(),
+    });
+  });
+
+  it('clears the composer + draft and shows a confirmation on a successful schedule', async () => {
+    const nowMs = Date.parse('2026-07-10T10:00:00Z');
+    vi.spyOn(Date, 'now').mockReturnValue(nowMs);
+    render(<Composer onSend={vi.fn()} members={[me]} meId={me.id} chatId={10} />);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+
+    const input = screen.getByPlaceholderText('Aa');
+    await userEvent.type(input, 'goodbye for now');
+    expect(localStorage.getItem('draft:chat:10')).toBe('goodbye for now');
+
+    await userEvent.click(screen.getByRole('button', { name: /schedule message/i }));
+    await userEvent.click(screen.getByRole('button', { name: 'Tomorrow, 09:00' }));
+
+    await waitFor(() => expect(screen.getByRole('status')).toBeInTheDocument());
+    expect(screen.getByRole('status')).toHaveTextContent(/scheduled for/i);
+    expect(input).toHaveValue('');
+    expect(localStorage.getItem('draft:chat:10')).toBeNull();
+  });
+
+  it('retains the content and surfaces the error when the server rejects a schedule', async () => {
+    installFetch({ postFails: true });
+    render(<Composer onSend={vi.fn()} members={[me]} meId={me.id} chatId={10} />);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+
+    const input = screen.getByPlaceholderText('Aa');
+    await userEvent.type(input, 'keep me on failure');
+    await userEvent.click(screen.getByRole('button', { name: /schedule message/i }));
+    await userEvent.click(screen.getByRole('button', { name: 'In 1 hour' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/must be in the future/i);
+    // Content survives a rejected schedule (nothing was cleared).
+    expect(input).toHaveValue('keep me on failure');
+  });
+
+  it('renders the pending-queue row and cancels a row via DELETE', async () => {
+    installFetch({
+      initial: [
+        scheduledDto({ id: 11, content: 'first queued' }),
+        scheduledDto({ id: 12, content: 'second queued' }),
+      ],
+    });
+    render(<Composer onSend={vi.fn()} members={[me]} meId={me.id} chatId={10} />);
+
+    // The count row appears once the queue loads.
+    const toggle = await screen.findByRole('button', { name: /2 scheduled messages/i });
+    await userEvent.click(toggle);
+
+    // Expanded list shows both, then cancelling one fires DELETE and drops it.
+    expect(screen.getByText('first queued')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: /cancel scheduled message: first queued/i }));
+
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(
+          ([url, init]) => init?.method === 'DELETE' && String(url).endsWith('/scheduled/11'),
+        ),
+      ).toBe(true),
+    );
+    expect(screen.queryByText('first queued')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /1 scheduled message/i })).toBeInTheDocument();
+  });
+
+  it('disables the clock (with an explanatory title) while attachments are staged', async () => {
+    (uploadAttachment as Mock).mockResolvedValue(dto);
+    (compressImage as Mock).mockImplementation(async (f: File) => f);
+    render(<Composer onSend={vi.fn()} members={[me]} meId={me.id} chatId={10} />);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+
+    await userEvent.type(screen.getByPlaceholderText('Aa'), 'text with a file');
+    const file = new File(['pdf'], 'report.pdf', { type: 'application/pdf' });
+    fireEvent.change(screen.getByTestId('file-input'), { target: { files: [file] } });
+    await waitFor(() => expect(screen.getByRole('button', { name: /send/i })).not.toBeDisabled());
+
+    const clock = screen.getByRole('button', { name: /schedule message/i });
+    expect(clock).toBeDisabled();
+    expect(clock).toHaveAttribute('title', expect.stringMatching(/attachments can't be scheduled/i));
   });
 });

@@ -27,6 +27,9 @@ daily use. See [PLAN.md](PLAN.md) for the architecture history and
 - Per-chat drafts survive switching chats and reloads
 - Offline outbox: text sends queue while offline ("sending…" bubbles) and
   flush in order on reconnect; failures offer tap-to-retry
+- Scheduled messages: the clock button sends later ("in 1 hour", "this
+  evening", "tomorrow 09:00", or any time) — doubles as reminders; pending
+  ones are listed and cancelable per chat
 - Paste or drag images straight into the composer
 
 **Media & attachments**
@@ -36,6 +39,8 @@ daily use. See [PLAN.md](PLAN.md) for the architecture history and
   and iOS work); browsers that can't decode a codec get a download card
 - Voice messages: tap the mic, record, send — inline audio player on the
   bubble (webm/opus, or mp4/AAC on iOS)
+- PDFs open in the browser's native viewer (magic-bytes-verified before
+  serving inline)
 - Everything else becomes a download card (25MB cap; SVGs never render
   inline — XSS hygiene)
 
@@ -45,6 +50,7 @@ daily use. See [PLAN.md](PLAN.md) for the architecture history and
   "load newer/older" paging from anywhere in history
 - Unread divider ("New messages") frozen where you left off, plus a
   jump-to-bottom pill with a live new-message count
+- History loads automatically as you scroll up (no "load more" buttons)
 
 **Presence & notifications**
 - Real-time delivery over Socket.IO; typing indicators; online presence dots
@@ -68,9 +74,15 @@ daily use. See [PLAN.md](PLAN.md) for the architecture history and
 - Webhook bots with a management UI at `/bots`: incoming messages POST to
   the bot's webhook; it replies via a Bearer-token API and fans out like any
   human message (see [examples/README.md](examples/README.md))
+- Interactive actions: a bot can attach up to six buttons to a message;
+  tapping one calls the bot's webhook back — enough for confirmations,
+  menus, and quick-reply workflows
 
 **PWA & ops**
 - Installable, offline app shell, hand-rolled service worker
+- Share target: share a photo/link from any app straight into a chat via
+  the OS share sheet (Android; iOS doesn't support Web Share Target)
+- Unread-count badge on the app icon
 - `/healthz` endpoint for the reverse proxy / Docker healthcheck
 - Automatic cleanup of orphaned attachment files (abandoned uploads, deleted
   messages)

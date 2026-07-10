@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import type { AttachmentDTO, ChatMemberDTO, ChatSummaryDTO, MessageDTO, MessagesPage, UserDTO } from '@messenger/shared';
+import type { AttachmentDTO, ChatMemberDTO, ChatSummaryDTO, MessageActionDTO, MessageDTO, MessagesPage, UserDTO } from '@messenger/shared';
 import ChatPage from './ChatPage';
 import { AuthProvider } from '../lib/auth';
 import { ApiError } from '../lib/api';
@@ -82,9 +82,15 @@ function jsonResponse(status: number, body: unknown): Response {
 
 const me: ChatMemberDTO = { id: 1, email: 'me@example.com', displayName: 'Me', isBot: false, lastReadMessageId: 0 };
 const bob: ChatMemberDTO = { id: 2, email: 'bob@example.com', displayName: 'Bob', isBot: false, lastReadMessageId: 0 };
+const botUser: ChatMemberDTO = { id: 3, email: 'bot@example.com', displayName: 'Echo Bot', isBot: true, lastReadMessageId: 0 };
 
 function msg(id: number, sender: UserDTO, content: string): MessageDTO {
   return { id, chatId: 10, sender, content, mentions: [], attachments: [], reactions: [], replyTo: null, createdAt: new Date(1_700_000_000_000 + id * 1000).toISOString(), editedAt: null, isDeleted: false };
+}
+
+/** A bot message carrying action buttons. */
+function actionMsg(id: number, content: string, actions: MessageActionDTO[]): MessageDTO {
+  return { ...msg(id, botUser, content), actions };
 }
 
 const dmChat: ChatSummaryDTO = {
@@ -108,10 +114,16 @@ function stubFetch(options: {
   onAround?: (id: number) => MessagesPage;
   /** GET /messages?after=<cursor> — the next newer page (newerCursor null at the edge). */
   onAfter?: (cursor: number) => MessagesPage;
+  /** GET /messages?before=<cursor> — the next older page (loadOlder). May return a
+   *  Promise so a test can hold it pending to assert the in-flight spinner. */
+  onBefore?: (cursor: number) => MessagesPage | Promise<MessagesPage>;
   onPost?: (body: unknown) => MessageDTO;
   onPatch?: (body: { content: string; mentions?: number[] }, id: number) => MessageDTO;
   /** POST /messages/:id/reactions — return the updated message for the toggled emoji. */
   onReact?: (body: { emoji: string }, id: number) => MessageDTO;
+  /** POST /messages/:id/actions — trigger a bot action button (defaults to 204).
+   *  May return a Promise so a test can hold it pending (busy-state assertions). */
+  onAction?: (id: number) => Response | Promise<Response>;
 }) {
   const chat = options.chat ?? dmChat;
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -132,17 +144,27 @@ function stubFetch(options: {
         : { ...msg(id, me, 'x'), reactions: [{ emoji: body.emoji, userIds: [me.id] }] };
       return jsonResponse(200, { message });
     }
+    if (url.endsWith('/actions') && method === 'POST') {
+      // .../messages/<id>/actions -> the id is the second-to-last path segment.
+      const id = Number(url.split('/').at(-2));
+      return options.onAction ? options.onAction(id) : jsonResponse(204, {});
+    }
     if (url.includes('/messages') && method === 'GET') {
       const params = new URL(url, 'http://localhost').searchParams;
       const around = params.get('around');
       const after = params.get('after');
+      const before = params.get('before');
       if (around != null && options.onAround) {
         return jsonResponse(200, options.onAround(Number(around)));
       }
       if (after != null && options.onAfter) {
         return jsonResponse(200, options.onAfter(Number(after)));
       }
-      // Default (newest page or ?before=): the contract omits newerCursor here.
+      if (before != null && options.onBefore) {
+        return jsonResponse(200, await options.onBefore(Number(before)));
+      }
+      // Default (newest page, or ?before= with no onBefore override): the
+      // contract omits newerCursor here.
       return jsonResponse(200, { messages: options.messages, nextCursor: options.nextCursor ?? null });
     }
     if (url.includes('/messages') && method === 'POST') {
@@ -207,12 +229,17 @@ function audioAttachment(id: number, name = 'voice-1.webm'): AttachmentDTO {
   };
 }
 
-function fileAttachment(id: number, name = 'report.pdf', sizeBytes = 3_355_443): AttachmentDTO {
+function fileAttachment(
+  id: number,
+  name = 'report.pdf',
+  sizeBytes = 3_355_443,
+  mimeType = 'application/pdf',
+): AttachmentDTO {
   return {
     id,
     kind: 'file',
     originalName: name,
-    mimeType: 'application/pdf',
+    mimeType,
     sizeBytes,
     width: null,
     height: null,
@@ -231,6 +258,48 @@ function stubClipboard() {
     configurable: true,
   });
   return writeText;
+}
+
+/**
+ * A tiny stand-in for IntersectionObserver (jsdom implements none — the fake
+ * ResizeObserver class further below is the same idea): captures every
+ * observer's callback + observed element so a test can fire a fabricated
+ * entry for a specific sentinel (matched by its data-testid), and tell
+ * whether a given sentinel is currently being observed. `disconnect()`
+ * removes the instance so a re-observe (effect re-run) doesn't leave a stale
+ * entry behind for `fire`/`observed` to find.
+ */
+function stubIntersectionObserver() {
+  type Entry = { isIntersecting: boolean };
+  type Callback = (entries: Entry[]) => void;
+  const instances = new Set<{ el: Element; callback: Callback }>();
+  vi.stubGlobal(
+    'IntersectionObserver',
+    class {
+      private entry: { el: Element; callback: Callback } | null = null;
+      constructor(private callback: Callback) {}
+      observe(el: Element) {
+        this.entry = { el, callback: this.callback };
+        instances.add(this.entry);
+      }
+      disconnect() {
+        if (this.entry) instances.delete(this.entry);
+      }
+      unobserve() {}
+    },
+  );
+  return {
+    /** Fire an intersection entry for the sentinel whose data-testid matches. */
+    fire(testId: string, isIntersecting = true) {
+      for (const inst of instances) {
+        if (inst.el.getAttribute('data-testid') === testId) inst.callback([{ isIntersecting }]);
+      }
+    },
+    /** Whether a sentinel with this data-testid is currently being observed. */
+    observed(testId: string) {
+      return [...instances].some((inst) => inst.el.getAttribute('data-testid') === testId);
+    },
+  };
 }
 
 /** Mock the scroll container's geometry and fire a scroll event reporting the
@@ -437,14 +506,36 @@ describe('ChatPage', () => {
     expect(grid?.querySelector('audio')).toBeNull();
   });
 
-  it('renders a file attachment as a download card with name and size', async () => {
+  it('renders a non-PDF file attachment as a download card (unchanged behavior)', async () => {
+    const fileMsg: MessageDTO = {
+      ...msg(1, bob, ''),
+      attachments: [fileAttachment(9, 'notes.docx', 3_355_443, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')],
+    };
+    stubFetch({ messages: [fileMsg] });
+    renderChatPage();
+
+    const name = await screen.findByText('notes.docx');
+    const link = name.closest('a') as HTMLAnchorElement;
+    expect(screen.getByText(formatBytes(3_355_443))).toBeInTheDocument();
+    expect(link.getAttribute('href')).toBe('/api/attachments/9?download=1');
+    expect(link).toHaveAttribute('download', 'notes.docx');
+    expect(link).not.toHaveAttribute('target');
+  });
+
+  it('opens a PDF attachment in a new tab via the native viewer instead of downloading', async () => {
     const fileMsg: MessageDTO = { ...msg(1, bob, ''), attachments: [fileAttachment(9)] };
     stubFetch({ messages: [fileMsg] });
     renderChatPage();
 
     const name = await screen.findByText('report.pdf');
-    expect(screen.getByText(formatBytes(3_355_443))).toBeInTheDocument();
-    expect(name.closest('a')?.getAttribute('href')).toBe('/api/attachments/9?download=1');
+    const link = name.closest('a') as HTMLAnchorElement;
+    // No ?download=1, no `download` attribute — opens inline in a new tab.
+    expect(link.getAttribute('href')).toBe('/api/attachments/9');
+    expect(link).not.toHaveAttribute('download');
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+    // Visual hint that this one opens rather than saves.
+    expect(screen.getByText(`PDF · ${formatBytes(3_355_443)}`)).toBeInTheDocument();
   });
 
   it('renders an attachment-only image message without a text bubble', async () => {
@@ -1539,6 +1630,171 @@ describe('ChatPage', () => {
     });
   });
 
+  // These tests exercise the new IntersectionObserver-driven auto-load, so
+  // each one stubs a fake IO class up front. The pre-existing "Load newer"
+  // coverage in the `focus mode` describe above deliberately keeps stubbing
+  // nothing: jsdom has no IntersectionObserver by default, so those tests
+  // already exercise (and continue to guard) the manual-button FALLBACK path
+  // without any change.
+  describe('auto-load older/newer (IntersectionObserver)', () => {
+    it('does not render or observe a sentinel when there is no more history', async () => {
+      const io = stubIntersectionObserver();
+      stubFetch({ messages: [msg(1, bob, 'only message')] }); // nextCursor defaults to null
+      renderChatPage();
+
+      await screen.findByText('only message');
+      expect(screen.queryByTestId('top-sentinel')).not.toBeInTheDocument();
+      expect(io.observed('top-sentinel')).toBe(false);
+    });
+
+    it('auto-loads an older page when the top sentinel intersects, anchoring the viewport on the same content', async () => {
+      const io = stubIntersectionObserver();
+      const fetchMock = stubFetch({
+        messages: [msg(10, bob, 'newest of the page')],
+        nextCursor: 10,
+        onBefore: () => ({ messages: [msg(1, bob, 'older one'), msg(2, bob, 'older two')], nextCursor: null }),
+      });
+      renderChatPage();
+      await screen.findByText('newest of the page');
+      expect(io.observed('top-sentinel')).toBe(true);
+
+      const scroller = screen.getByTestId('message-scroll');
+      let scrollTop = 0;
+      Object.defineProperty(scroller, 'scrollTop', {
+        get: () => scrollTop,
+        set: (v: number) => {
+          scrollTop = v;
+        },
+        configurable: true,
+      });
+      // scrollHeight reflects whatever is actually in the DOM right now — 500
+      // before the older page lands, 1300 once it has — so the anchoring math
+      // (`scrollTop = newHeight - prevHeight`) is exercised for real rather
+      // than asserting a hard-coded timing.
+      Object.defineProperty(scroller, 'scrollHeight', {
+        get: () => (screen.queryByText('older one') ? 1300 : 500),
+        configurable: true,
+      });
+
+      act(() => {
+        io.fire('top-sentinel');
+      });
+
+      expect(await screen.findByText('older one')).toBeInTheDocument();
+      expect(fetchMock.mock.calls.some(([i]) => i.toString().includes('before=10'))).toBe(true);
+      // Anchored: scrollTop lands on (grown height) - (height before the load).
+      await waitFor(() => expect(scrollTop).toBe(800));
+    });
+
+    it('never starts a second older load while one is already in flight', async () => {
+      const io = stubIntersectionObserver();
+      const fetchMock = stubFetch({
+        messages: [msg(10, bob, 'newest')],
+        nextCursor: 10,
+        onBefore: () => ({ messages: [msg(1, bob, 'older one')], nextCursor: null }),
+      });
+      renderChatPage();
+      await screen.findByText('newest');
+
+      // Two entries in the same tick: the guard must swallow the second one —
+      // it's set synchronously before the first fetch's await ever yields.
+      act(() => {
+        io.fire('top-sentinel');
+        io.fire('top-sentinel');
+      });
+
+      await screen.findByText('older one');
+      expect(fetchMock.mock.calls.filter(([i]) => i.toString().includes('before='))).toHaveLength(1);
+    });
+
+    it('stops observing the top sentinel once the last older page is loaded (hasMore flips false)', async () => {
+      const io = stubIntersectionObserver();
+      stubFetch({
+        messages: [msg(10, bob, 'newest')],
+        nextCursor: 10,
+        onBefore: () => ({ messages: [msg(1, bob, 'oldest')], nextCursor: null }),
+      });
+      renderChatPage();
+      await screen.findByText('newest');
+
+      act(() => {
+        io.fire('top-sentinel');
+      });
+
+      await screen.findByText('oldest');
+      expect(screen.queryByTestId('top-sentinel')).not.toBeInTheDocument();
+      expect(io.observed('top-sentinel')).toBe(false);
+    });
+
+    it('shows a small spinner row while an auto-triggered older-page fetch is in flight', async () => {
+      const io = stubIntersectionObserver();
+      let resolveOlder: ((page: MessagesPage) => void) | null = null;
+      stubFetch({
+        messages: [msg(10, bob, 'newest')],
+        nextCursor: 10,
+        onBefore: () =>
+          new Promise<MessagesPage>((resolve) => {
+            resolveOlder = resolve;
+          }),
+      });
+      renderChatPage();
+      await screen.findByText('newest');
+
+      act(() => {
+        io.fire('top-sentinel');
+      });
+
+      expect(await screen.findByRole('status', { name: 'Loading older messages' })).toBeInTheDocument();
+
+      await act(async () => {
+        resolveOlder?.({ messages: [msg(1, bob, 'older one')], nextCursor: null });
+      });
+
+      await screen.findByText('older one');
+      expect(screen.queryByRole('status', { name: 'Loading older messages' })).not.toBeInTheDocument();
+    });
+
+    it('auto-loads a newer page when the bottom sentinel intersects in windowed mode, reaching the live edge', async () => {
+      const io = stubIntersectionObserver();
+      const windowPage: MessagesPage = { messages: [msg(3, bob, 'target message')], nextCursor: null, newerCursor: 3 };
+      const newerPage: MessagesPage = { messages: [msg(4, me, 'fourth')], nextCursor: null, newerCursor: null };
+      stubFetch({ messages: [], onAround: () => windowPage, onAfter: () => newerPage });
+      renderChatPage('/chats/10?message=3');
+
+      await screen.findByText('target message');
+      expect(io.observed('bottom-sentinel')).toBe(true);
+      expect(screen.queryByRole('button', { name: 'Load newer' })).not.toBeInTheDocument();
+
+      act(() => {
+        io.fire('bottom-sentinel');
+      });
+
+      expect(await screen.findByText('fourth')).toBeInTheDocument();
+      // Reached the live edge — the sentinel (and its observer) is gone.
+      expect(screen.queryByTestId('bottom-sentinel')).not.toBeInTheDocument();
+      expect(io.observed('bottom-sentinel')).toBe(false);
+    });
+
+    it('falls back to the manual "Load older" button when IntersectionObserver is unavailable', async () => {
+      // Deliberately no stubIntersectionObserver() call — jsdom's real
+      // (missing) global exercises the ancient-browser fallback path.
+      expect(typeof IntersectionObserver).toBe('undefined');
+      const fetchMock = stubFetch({
+        messages: [msg(10, bob, 'newest')],
+        nextCursor: 10,
+        onBefore: () => ({ messages: [msg(1, bob, 'older via button')], nextCursor: null }),
+      });
+      renderChatPage();
+      await screen.findByText('newest');
+
+      expect(screen.queryByTestId('top-sentinel')).not.toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', { name: 'Load older' }));
+
+      expect(await screen.findByText('older via button')).toBeInTheDocument();
+      expect(fetchMock.mock.calls.some(([i]) => i.toString().includes('before=10'))).toBe(true);
+    });
+  });
+
   describe('offline outbox', () => {
     /** POST calls a fetch stub recorded (method === 'POST' to /messages). */
     function postCalls(fetchMock: ReturnType<typeof stubFetch>) {
@@ -1828,6 +2084,103 @@ describe('ChatPage', () => {
       expect(screen.getByPlaceholderText('Aa')).toHaveValue('over the limit');
       expect(screen.queryByText('Sending…')).not.toBeInTheDocument();
       expect(localStorage.getItem('outbox:chat:10')).toBeNull();
+    });
+  });
+
+  describe('bot action buttons', () => {
+    it('renders one button per action under a bot message, with style-mapped colors', async () => {
+      stubFetch({
+        messages: [
+          actionMsg(5, 'Deploy to production?', [
+            { id: 'go', label: 'Deploy', style: 'primary' },
+            { id: 'stop', label: 'Cancel', style: 'danger' },
+            { id: 'later', label: 'Remind me later' },
+          ]),
+        ],
+      });
+      renderChatPage();
+
+      await screen.findByText('Deploy to production?');
+
+      const primary = screen.getByRole('button', { name: 'Deploy' });
+      const danger = screen.getByRole('button', { name: 'Cancel' });
+      const neutral = screen.getByRole('button', { name: 'Remind me later' });
+
+      expect(primary.className).toContain('bg-[#0084ff]'); // app blue
+      expect(danger.className).toContain('bg-red-500'); // red accent
+      expect(neutral.className).toContain('bg-gray-100'); // neutral default
+    });
+
+    it('does not render action buttons on a human message', async () => {
+      stubFetch({ messages: [msg(1, bob, 'just a human message')] });
+      renderChatPage();
+
+      await screen.findByText('just a human message');
+      // No action row for a message without actions.
+      expect(screen.queryByRole('button', { name: 'Deploy' })).not.toBeInTheDocument();
+    });
+
+    it('never renders action buttons on a tombstone (deleted bot message)', async () => {
+      // Even if a deleted DTO somehow still carried actions, the tombstone bubble
+      // replaces the whole message stack — no buttons render.
+      const tomb: MessageDTO = {
+        ...actionMsg(5, '', [{ id: 'go', label: 'Ghost button' }]),
+        content: '',
+        isDeleted: true,
+      };
+      stubFetch({ messages: [tomb] });
+      renderChatPage();
+
+      expect(await screen.findByText('Message deleted')).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Ghost button' })).not.toBeInTheDocument();
+    });
+
+    it('tapping a button POSTs { actionId } to the actions endpoint', async () => {
+      const fetchMock = stubFetch({
+        messages: [actionMsg(5, 'Pick:', [{ id: 'yes', label: 'Yes', style: 'primary' }])],
+      });
+      renderChatPage();
+
+      await userEvent.click(await screen.findByRole('button', { name: 'Yes' }));
+
+      await waitFor(() => {
+        const call = fetchMock.mock.calls.find(
+          ([i, init]) =>
+            i.toString().endsWith('/messages/5/actions') && init?.method === 'POST',
+        );
+        expect(call).toBeDefined();
+        expect(JSON.parse(call![1]?.body as string)).toEqual({ actionId: 'yes' });
+      });
+    });
+
+    it('busy state prevents a double-tap from double-firing, then re-enables', async () => {
+      let release!: () => void;
+      const pending = new Promise<Response>((resolve) => {
+        release = () => resolve(jsonResponse(204, {}));
+      });
+      const fetchMock = stubFetch({
+        messages: [actionMsg(5, 'Pick:', [{ id: 'yes', label: 'Yes' }])],
+        onAction: () => pending,
+      });
+      renderChatPage();
+
+      const button = await screen.findByRole('button', { name: 'Yes' });
+      // First tap fires the POST and disables the button while in flight.
+      await userEvent.click(button);
+      expect(button).toBeDisabled();
+
+      // A second tap while busy is a no-op (disabled) — still exactly one POST.
+      await userEvent.click(button);
+      const actionCalls = () =>
+        fetchMock.mock.calls.filter(
+          ([i, init]) => i.toString().endsWith('/actions') && init?.method === 'POST',
+        );
+      expect(actionCalls()).toHaveLength(1);
+
+      // Resolving the request re-enables the button (a failure would do the same).
+      release();
+      await waitFor(() => expect(button).not.toBeDisabled());
+      expect(actionCalls()).toHaveLength(1);
     });
   });
 });

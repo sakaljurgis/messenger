@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
 import path from 'node:path';
 import type { AttachmentKind } from '@messenger/shared';
 import { eq } from 'drizzle-orm';
@@ -137,6 +138,37 @@ function parseRange(header: string | undefined, size: number): RangeResult {
     return 'unsatisfiable';
   }
   return { start, end: Math.min(end, size - 1) };
+}
+
+/** The PDF file signature, as the first bytes of a well-formed PDF. */
+const PDF_MAGIC = Buffer.from('%PDF-');
+
+/**
+ * Reads just the first 5 bytes of a stored file and checks them against the
+ * PDF magic header. The stored mimeType alone isn't trustworthy for deciding
+ * whether to render something inline in the browser's PDF viewer — nothing
+ * stops a client from uploading an .html file with a lying
+ * `application/pdf` mime — so inline PDF serving is gated on this check too.
+ * Any read failure (missing file, permission error, etc.) is treated as "not
+ * a PDF"; the regular storage.size() lookup a few lines below the call site
+ * will surface the real 404 if the file is actually gone.
+ */
+function looksLikePdf(storage: Storage, fileName: string): boolean {
+  let fd: number;
+  try {
+    fd = fs.openSync(storage.filePath(fileName), 'r');
+  } catch {
+    return false;
+  }
+  try {
+    const buf = Buffer.alloc(PDF_MAGIC.length);
+    const bytesRead = fs.readSync(fd, buf, 0, buf.length, 0);
+    return bytesRead === PDF_MAGIC.length && buf.equals(PDF_MAGIC);
+  } catch {
+    return false;
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 /**
@@ -289,23 +321,57 @@ export function attachmentsRouter(db: Db, storage: Storage): Router {
     // Thumb only exists for images; fall back to the full file when absent.
     const serveThumb = wantThumb && att.thumbPath !== null;
     const fileName = serveThumb ? att.thumbPath! : att.storagePath;
+
+    // A PDF (kind stays 'file' — only mimeType marks it) is served inline in
+    // the browser's native PDF viewer unless ?download=1 is requested, same
+    // as any other 'file' forced-download case. Gated on a magic-bytes check
+    // in addition to the stored mimeType — see looksLikePdf.
+    const pdfCandidate =
+      !serveThumb && !wantDownload && kind === 'file' && att.mimeType === 'application/pdf';
+    const servePdfInline = pdfCandidate && looksLikePdf(storage, fileName);
+
     // Images and the browser-safe video/audio types are served with their real
-    // mime so the browser renders them inline; anything else is an opaque
-    // download.
+    // mime so the browser renders them inline; a PDF being served inline gets
+    // its real mime too; anything else is an opaque download.
     const contentType = serveThumb
       ? 'image/webp'
-      : kind === 'image' || kind === 'video' || kind === 'audio'
-        ? att.mimeType
-        : 'application/octet-stream';
+      : servePdfInline
+        ? 'application/pdf'
+        : kind === 'image' || kind === 'video' || kind === 'audio'
+          ? att.mimeType
+          : 'application/octet-stream';
 
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Content-Security-Policy', 'sandbox');
+    // Every other attachment gets a sandboxing CSP (blocks scripts/plugins/
+    // forms/popups entirely) because kind 'file' downloads and even inline
+    // images/video/audio never execute as page content anyway, so 'sandbox'
+    // costs nothing. A PDF served inline is the one exception: Chromium's
+    // built-in PDF viewer is itself a plugin, and it refuses to activate
+    // under a sandboxing CSP (the sandbox directive blocks plugins), so the
+    // whole file would silently fail to render. PDFs render inside that
+    // viewer's own isolated surface, not as page DOM/script — so this is not
+    // the inline-SVG XSS hole (SVG is exactly page-renderable, inline markup
+    // that scripts can run in; a PDF's content stream cannot reach the DOM
+    // or cookies). The replacement policy stays as restrictive as the
+    // viewer allows: no active content of any kind (`default-src 'none'`),
+    // no plugin/object source but same-origin (`object-src 'self'`, which is
+    // what actually lets the viewer load), and no framing this response into
+    // another origin (`frame-ancestors 'self'`).
+    res.setHeader(
+      'Content-Security-Policy',
+      servePdfInline ? "default-src 'none'; object-src 'self'; frame-ancestors 'self'" : 'sandbox',
+    );
     res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
     res.setHeader('Content-Type', contentType);
     res.setHeader('Accept-Ranges', 'bytes');
     if (wantDownload) {
       const encoded = encodeURIComponent(att.originalName);
       res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encoded}`);
+    } else if (servePdfInline) {
+      // Mirrors the ?download=1 encoding — the filename matters for the
+      // viewer's own save/download button.
+      const encoded = encodeURIComponent(att.originalName);
+      res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encoded}`);
     } else if (kind === 'file' && !serveThumb) {
       // Never render an unknown/uploaded file inline.
       res.setHeader('Content-Disposition', 'attachment');

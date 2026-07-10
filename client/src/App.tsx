@@ -12,6 +12,7 @@ import ChatPage from './pages/ChatPage';
 import NewGroupPage from './pages/NewGroupPage';
 import SettingsPage from './pages/SettingsPage';
 import BotsPage from './pages/BotsPage';
+import SharePage from './pages/SharePage';
 
 /** Routes notification-click messages from the service worker through the SPA
  *  router (no reload). Must live inside BrowserRouter for useNavigate. */
@@ -42,6 +43,10 @@ export default function App() {
             {/* Full-screen screens (own header, no bottom tabs), Messenger-style. */}
             <Route path="/chats/new-group" element={<NewGroupPage />} />
             <Route path="/chats/:id" element={<ChatPage />} />
+            {/* Web Share Target landing (Android/Chromium): the OS share sheet
+                POSTs to /share, the service worker stashes the payload and
+                303-redirects here. */}
+            <Route path="/share" element={<SharePage />} />
           </Route>
         </Routes>
       </AuthProvider>

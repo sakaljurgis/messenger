@@ -3,6 +3,7 @@ import type {
   ChatMemberDTO,
   ChatSummaryDTO,
   LinkPreviewDTO,
+  MessageActionDTO,
   MessageDTO,
   ReactionGroupDTO,
   ReplyToDTO,
@@ -82,14 +83,52 @@ function parseLinkPreview(raw: string | null): LinkPreviewDTO | null {
 }
 
 /**
+ * Parses the raw `messages.actions` JSON column into {@link MessageActionDTO}s.
+ * Bot action buttons are validated on the way in (routes/bot-api.ts), so this
+ * is mostly a re-hydrate; but like {@link parseLinkPreview} it NEVER throws —
+ * a null column, malformed JSON, a non-array, or an array with no well-formed
+ * entries all collapse to `undefined` (the DTO field is simply absent). Each
+ * entry is re-shaped to the exact DTO (id/label/optional style) so no stray
+ * persisted keys leak, malformed entries are dropped, and the list is capped at
+ * 6 to match the contract regardless of what the column holds.
+ */
+export function parseActions(raw: string | null): MessageActionDTO[] | undefined {
+  if (raw === null) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return undefined;
+    const actions: MessageActionDTO[] = [];
+    for (const entry of parsed) {
+      if (
+        entry === null ||
+        typeof entry !== 'object' ||
+        typeof (entry as MessageActionDTO).id !== 'string' ||
+        typeof (entry as MessageActionDTO).label !== 'string'
+      ) {
+        continue;
+      }
+      const { id, label, style } = entry as MessageActionDTO;
+      const action: MessageActionDTO = { id, label };
+      if (style === 'primary' || style === 'danger') action.style = style;
+      actions.push(action);
+      if (actions.length === 6) break;
+    }
+    return actions.length > 0 ? actions : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Maps a message row (+ its resolved sender, mention user ids and attachments)
  * to the API shape. `createdAt` is a Date from the drizzle timestamp column →
  * ISO string over the wire. `attachments` defaults to empty for plain messages.
  *
  * Deleted messages serialize as a tombstone: the original text, mentions,
- * attachments, reactions, reply reference and link preview are dropped
- * (`content: ''`, all lists empty, `replyTo: null`, `linkPreview: null`,
- * `editedAt: null`) so a deleted message can never leak its former contents —
+ * attachments, reactions, reply reference, link preview and action buttons are
+ * dropped (`content: ''`, all lists empty, `replyTo: null`, `linkPreview: null`,
+ * `actions` absent, `editedAt: null`) so a deleted message can never leak its
+ * former contents —
  * even though the underlying `link_preview` column, like `content`, is left
  * untouched by the soft-delete itself (see chats/service#deleteMessage).
  * `replyTo`, when present, is the target's snapshot.
@@ -114,6 +153,9 @@ export function toMessageDTO(
     replyTo: isDeleted ? null : replyTo,
     createdAt: message.createdAt.toISOString(),
     linkPreview: isDeleted ? null : parseLinkPreview(message.linkPreview),
+    // Bot action buttons: absent for humans (null column) and always dropped on
+    // a tombstone — matching the rest of the tombstone neutering above.
+    actions: isDeleted ? undefined : parseActions(message.actions),
     editedAt: isDeleted || message.editedAt === null ? null : message.editedAt.toISOString(),
     isDeleted,
   };

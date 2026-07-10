@@ -15,6 +15,16 @@ import type { ChatEvents } from '../events.js';
  * filtering, unread bookkeeping, `message:new` fan-out).
  */
 
+// One action button. Hard limits mirror MessageActionDTO in the shared
+// contract: id non-empty ≤64, label non-empty ≤40, style absent or one of the
+// two accents. Anything else (extra keys are stripped; wrong types, over-length,
+// a bad style value) fails the parse → 400.
+const actionSchema = z.object({
+  id: z.string().min(1, 'Action id required').max(64, 'Action id too long'),
+  label: z.string().min(1, 'Action label required').max(40, 'Action label too long'),
+  style: z.enum(['primary', 'danger']).optional(),
+});
+
 const sendSchema = z
   .object({
     chatId: z.number().int().positive(),
@@ -22,6 +32,14 @@ const sendSchema = z
     content: z.string().trim().max(4000).optional().default(''),
     mentions: z.array(z.number().int().positive()).optional(),
     attachmentIds: z.array(z.number().int().positive()).optional(),
+    // Action buttons (bots only): at most 6, with unique ids.
+    actions: z
+      .array(actionSchema)
+      .max(6, 'At most 6 actions allowed')
+      .refine((arr) => new Set(arr.map((a) => a.id)).size === arr.length, {
+        message: 'Duplicate action id',
+      })
+      .optional(),
   })
   .refine((d) => d.content.length > 0 || (d.attachmentIds?.length ?? 0) > 0, {
     message: 'Message content or attachments required',
@@ -82,6 +100,7 @@ export function botApiRouter(db: Db, events: ChatEvents): Router {
       content: parsed.data.content,
       mentions: parsed.data.mentions,
       attachmentIds: parsed.data.attachmentIds,
+      actions: parsed.data.actions,
     });
     if (!result.ok) {
       if (result.reason === 'invalid-attachments') {

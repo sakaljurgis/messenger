@@ -1,5 +1,5 @@
 import { inArray } from 'drizzle-orm';
-import type { MessageDTO } from '@messenger/shared';
+import type { MessageDTO, UserDTO } from '@messenger/shared';
 import type { Db } from './db/index.js';
 import { users, type ChatRow } from './db/schema.js';
 import type { ChatEvents } from './events.js';
@@ -11,15 +11,34 @@ import type { ChatEvents } from './events.js';
  * This is the bot counterpart of push.ts: push notifies offline humans,
  * webhooks notify bots, both off the same `message:new` event.
  *
+ * The same subscriber also delivers action callbacks: when a member taps a bot
+ * message's action button (`action:triggered`), it POSTs an `{ type: 'action',
+ * … }` payload to the bot that sent the buttons — same URL, headers, timeout
+ * and retry as a message webhook.
+ *
  * Delivery is best-effort: a 5s timeout, one retry after ~1s on network error
  * or a non-2xx response, then a `console.warn` and give-up. Never throws —
  * one dead bot must never take down message sending for everyone else.
  */
 
-/** JSON body POSTed to a bot's webhookUrl. */
+/** JSON body POSTed to a bot's webhookUrl for a new message in one of its chats. */
 export interface WebhookPayload {
   message: MessageDTO;
   chat: { id: number; type: ChatRow['type']; name: string | null };
+}
+
+/**
+ * JSON body POSTed to a bot's webhookUrl when a member taps one of its action
+ * buttons. `type: 'action'` distinguishes it from the (untagged) message
+ * payload above; `message` is the DTO of the message carrying the button,
+ * `user` the tapper, `action.id` the tapped button's id.
+ */
+export interface ActionWebhookPayload {
+  type: 'action';
+  action: { id: string };
+  message: MessageDTO;
+  user: UserDTO;
+  chatId: number;
 }
 
 export interface WebhookHandle {
@@ -45,14 +64,16 @@ interface DeliverableBot {
 }
 
 /**
- * Delivers one payload to one bot: try, and on network error or non-2xx retry
- * once after `retryDelayMs`; if that also fails, warn and give up. Swallows
- * every error itself so callers can fire-and-forget via `Promise.allSettled`.
+ * Delivers one JSON `body` to one bot: try, and on network error or non-2xx
+ * retry once after `retryDelayMs`; if that also fails, warn and give up.
+ * Swallows every error itself so callers can fire-and-forget via
+ * `Promise.allSettled`. Shared verbatim by message and action delivery, so
+ * both carry identical headers/timeout/retry semantics.
  */
 async function deliver(
   fetchFn: typeof fetch,
   bot: DeliverableBot,
-  payload: WebhookPayload,
+  body: WebhookPayload | ActionWebhookPayload,
   retryDelayMs: number,
 ): Promise<void> {
   for (let attempt = 1; attempt <= 2; attempt++) {
@@ -60,7 +81,7 @@ async function deliver(
       const res = await fetchFn(bot.webhookUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Bot-Token': bot.apiToken },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(body),
         signal: AbortSignal.timeout(TIMEOUT_MS),
       });
       if (res.ok) return;
@@ -111,8 +132,30 @@ export function initWebhooks(
     );
   }
 
+  // An action tap: POST the callback to the one bot that sent the buttons. The
+  // route already guaranteed `bot` is a live bot with a webhookUrl; the
+  // apiToken guard mirrors the message path (a token-less bot can't be proven
+  // to the receiver, so it's skipped).
+  async function dispatchAction(
+    bot: typeof users.$inferSelect,
+    payload: ActionWebhookPayload,
+  ): Promise<void> {
+    if (!bot.webhookUrl || !bot.apiToken) return;
+    await deliver(fetchFn, { webhookUrl: bot.webhookUrl, apiToken: bot.apiToken }, payload, retryDelayMs);
+  }
+
   events.on('message:new', ({ message, chat, memberIds }) => {
     handle.lastDispatch = dispatch(message, chat, memberIds);
+  });
+
+  events.on('action:triggered', ({ bot, actionId, message, user, chat }) => {
+    handle.lastDispatch = dispatchAction(bot, {
+      type: 'action',
+      action: { id: actionId },
+      message,
+      user,
+      chatId: chat.id,
+    });
   });
 
   return handle;

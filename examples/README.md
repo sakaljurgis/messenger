@@ -65,3 +65,45 @@ bot can't trigger an infinite loop with itself.
 Webhook delivery has a 5s timeout and retries once (~1s later) on a network
 error or non-2xx response; if that also fails, the server logs a warning and
 gives up silently — a dead bot never blocks message delivery for anyone else.
+
+## Interactive action buttons
+
+A bot can attach up to **6 tappable buttons** to any message it sends, by
+adding an `actions` array to the send body. Each action is
+`{ id, label, style? }` — `id` ≤64 chars (echoed back on tap), `label` ≤40
+chars, and an optional `style` of `"primary"` (blue) or `"danger"` (red);
+omit it for a neutral gray button. Ids must be unique within a message.
+Buttons are a bot-only feature — a human client that sends `actions` has the
+field ignored.
+
+```bash
+# The bot sends a message with two buttons (Bearer-authenticated like any send).
+curl -X POST http://localhost:3001/api/bot/messages \
+  -H "Authorization: Bearer $BOT_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"chatId":1,"content":"Deploy to production?","actions":[
+        {"id":"go","label":"Deploy","style":"primary"},
+        {"id":"stop","label":"Cancel","style":"danger"}
+      ]}'
+```
+
+When a member taps a button, the server POSTs an **action callback** to the
+same `webhookUrl` (same `X-Bot-Token` header, same timeout/retry). Its shape is
+distinguished from a message webhook by a `type` field:
+
+```json
+{
+  "type": "action",
+  "action": { "id": "go" },
+  "message": { "...": "the MessageDTO that carried the buttons" },
+  "user": { "...": "the UserDTO of whoever tapped" },
+  "chatId": 1
+}
+```
+
+The bot reacts however it likes — usually by sending a follow-up message. The
+tap itself returns `204` immediately; the callback is fire-and-forget, so the
+bot's reply arriving in the chat is the visible feedback. Tombstoned (deleted)
+messages drop their buttons, and taps on them are rejected. See
+`echo-bot.mjs` — it echoes every message back with 👍/👎 buttons and replies
+when one is tapped.

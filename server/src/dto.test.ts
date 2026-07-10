@@ -38,6 +38,7 @@ function makeMessage(overrides: Partial<MessageRow> = {}): MessageRow {
     content: 'hi',
     replyToId: null,
     linkPreview: null,
+    actions: null,
     createdAt: new Date(),
     editedAt: null,
     deletedAt: null,
@@ -122,6 +123,75 @@ describe('toMessageDTO', () => {
       [],
     );
     expect(dto.linkPreview).toBeNull();
+    expect(dto.isDeleted).toBe(true);
+  });
+
+  it('is absent when the actions column is null (human message)', () => {
+    const dto = toMessageDTO(makeMessage({ actions: null }), makeUser(), []);
+    expect(dto.actions).toBeUndefined();
+  });
+
+  it('parses a JSON actions column into MessageActionDTO[]', () => {
+    const actions = [
+      { id: 'yes', label: 'Yes', style: 'primary' },
+      { id: 'no', label: 'No', style: 'danger' },
+      { id: 'meh', label: 'Maybe' },
+    ];
+    const dto = toMessageDTO(makeMessage({ actions: JSON.stringify(actions) }), makeUser(), []);
+    expect(dto.actions).toEqual(actions);
+  });
+
+  it('re-shapes each entry to id/label/style, dropping any stray persisted keys', () => {
+    const dto = toMessageDTO(
+      makeMessage({ actions: JSON.stringify([{ id: 'a', label: 'A', extra: 'nope', style: 'primary' }]) }),
+      makeUser(),
+      [],
+    );
+    expect(dto.actions).toEqual([{ id: 'a', label: 'A', style: 'primary' }]);
+  });
+
+  it('omits an unknown style value rather than passing it through', () => {
+    const dto = toMessageDTO(
+      makeMessage({ actions: JSON.stringify([{ id: 'a', label: 'A', style: 'rainbow' }]) }),
+      makeUser(),
+      [],
+    );
+    expect(dto.actions).toEqual([{ id: 'a', label: 'A' }]);
+  });
+
+  it('drops malformed entries and collapses to absent when none remain', () => {
+    const dto = toMessageDTO(
+      makeMessage({ actions: JSON.stringify([{ id: 5, label: 'no' }, null, 'x']) }),
+      makeUser(),
+      [],
+    );
+    expect(dto.actions).toBeUndefined();
+  });
+
+  it('caps a longer persisted list at 6 entries', () => {
+    const many = Array.from({ length: 9 }, (_, i) => ({ id: `a${i}`, label: `A${i}` }));
+    const dto = toMessageDTO(makeMessage({ actions: JSON.stringify(many) }), makeUser(), []);
+    expect(dto.actions).toHaveLength(6);
+  });
+
+  it('never throws on malformed JSON in actions — collapses to absent', () => {
+    const dto = toMessageDTO(makeMessage({ actions: '{not valid json' }), makeUser(), []);
+    expect(dto.actions).toBeUndefined();
+  });
+
+  it('collapses a non-array JSON actions value to absent', () => {
+    const dto = toMessageDTO(makeMessage({ actions: '{"id":"x"}' }), makeUser(), []);
+    expect(dto.actions).toBeUndefined();
+  });
+
+  it('a tombstone never carries actions, even when the column has data', () => {
+    const actions = [{ id: 'yes', label: 'Yes' }];
+    const dto = toMessageDTO(
+      makeMessage({ actions: JSON.stringify(actions), deletedAt: new Date() }),
+      makeUser(),
+      [],
+    );
+    expect(dto.actions).toBeUndefined();
     expect(dto.isDeleted).toBe(true);
   });
 });

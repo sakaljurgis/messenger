@@ -89,6 +89,21 @@ export interface LinkPreviewDTO {
   siteName: string | null;
 }
 
+/**
+ * One tappable action button on a BOT message (humans can't send actions).
+ * Rendered as a button row under the bubble; tapping POSTs
+ * /api/chats/:chatId/messages/:messageId/actions { actionId } (204), which
+ * dispatches an action event to the bot's webhook.
+ */
+export interface MessageActionDTO {
+  /** Bot-chosen identifier echoed back on tap. ≤64 chars. */
+  id: string;
+  /** Button label. ≤40 chars. */
+  label: string;
+  /** Visual emphasis; default is a neutral button. */
+  style?: 'primary' | 'danger';
+}
+
 export interface MessageDTO {
   id: number;
   chatId: number;
@@ -115,6 +130,11 @@ export interface MessageDTO {
    * (null/absent before resolution, after a failed fetch, and for tombstones).
    */
   linkPreview?: LinkPreviewDTO | null;
+  /**
+   * Action buttons (bot messages only, ≤6). Empty/absent for human messages
+   * and always absent for tombstones.
+   */
+  actions?: MessageActionDTO[];
   /** ISO 8601 of the last edit, or null when never edited. Always null for tombstones. */
   editedAt: string | null;
   /**
@@ -169,6 +189,40 @@ export interface SendMessageRequest {
    * same chat, else the send is rejected with 400 'Invalid reply target'.
    */
   replyToId?: number;
+}
+
+/** POST /api/chats/:chatId/messages/:messageId/actions — tap a bot action button (204). */
+export interface TriggerActionRequest {
+  actionId: string;
+}
+
+/**
+ * A queued send-later message (text only — attachments can't be scheduled).
+ * POST /api/chats/:id/scheduled creates one; GET lists MINE for that chat;
+ * DELETE /api/chats/:id/scheduled/:scheduledId cancels (204). At the
+ * scheduled time the server sends it through the normal message flow
+ * (sockets/push/webhooks all fire as if sent live).
+ */
+export interface ScheduledMessageDTO {
+  id: number;
+  chatId: number;
+  content: string;
+  mentions: number[];
+  replyToId: number | null;
+  /** ISO 8601 — when it will be sent. */
+  scheduledAt: string;
+  /** ISO 8601 — when it was queued. */
+  createdAt: string;
+}
+
+/** POST /api/chats/:id/scheduled — queue a send-later message. */
+export interface ScheduleMessageRequest {
+  /** Trimmed 1–4000 chars (same rule as a live send; can't be empty). */
+  content: string;
+  mentions?: number[];
+  replyToId?: number;
+  /** ISO 8601; must be in the future (≥1 min, ≤1 year). */
+  scheduledAt: string;
 }
 
 /** PATCH /api/chats/:chatId/messages/:messageId — edit own message text (attachments are not editable). */

@@ -657,6 +657,119 @@ describe('GET /api/attachments/:id — serving', () => {
     const res = await alice.agent.get(`/api/attachments/${att.id}`);
     expect(res.status).toBe(404);
   });
+
+  describe('PDFs', () => {
+    /** A minimal but real-looking PDF payload (starts with the '%PDF-' magic). */
+    function makePdfBytes(size = 5000): Buffer {
+      const body = randomBytes(size - 5);
+      return Buffer.concat([Buffer.from('%PDF-1.4\n'), body]);
+    }
+
+    async function uploadAndLinkPdf(
+      bytes: Buffer,
+      name = 'report.pdf',
+    ): Promise<AttachmentDTO> {
+      const up = await upload(alice, group, bytes, name, 'application/pdf');
+      const att = up.body.attachment as AttachmentDTO;
+      expect(att.kind).toBe('file');
+      await alice.agent
+        .post(`/api/chats/${group}/messages`)
+        .send({ content: '', attachmentIds: [att.id] });
+      return att;
+    }
+
+    it('serves a real PDF inline with a viewer-compatible CSP and the exact bytes', async () => {
+      const bytes = makePdfBytes();
+      const att = await uploadAndLinkPdf(bytes);
+
+      const res = await bob.agent
+        .get(`/api/attachments/${att.id}`)
+        .buffer(true)
+        .parse(binaryParser);
+
+      expect(res.status).toBe(200);
+      expect(res.headers['content-type']).toBe('application/pdf');
+      expect(res.headers['content-disposition']).toContain('inline');
+      expect(res.headers['content-disposition']).toContain(
+        "filename*=UTF-8''report.pdf",
+      );
+      expect(res.headers['x-content-type-options']).toBe('nosniff');
+      expect(res.headers['content-security-policy']).toBe(
+        "default-src 'none'; object-src 'self'; frame-ancestors 'self'",
+      );
+      expect(res.headers['accept-ranges']).toBe('bytes');
+      expect((res.body as Buffer).equals(bytes)).toBe(true);
+    });
+
+    it('supports a 206 range request on an inline PDF (browser viewer range-loads large files)', async () => {
+      const bytes = makePdfBytes();
+      const att = await uploadAndLinkPdf(bytes);
+
+      const res = await bob.agent
+        .get(`/api/attachments/${att.id}`)
+        .set('Range', 'bytes=10-49')
+        .buffer(true)
+        .parse(binaryParser);
+
+      expect(res.status).toBe(206);
+      expect(res.headers['content-type']).toBe('application/pdf');
+      expect(res.headers['content-range']).toBe(`bytes 10-49/${bytes.length}`);
+      expect(res.headers['content-length']).toBe('40');
+      expect(res.headers['content-security-policy']).toBe(
+        "default-src 'none'; object-src 'self'; frame-ancestors 'self'",
+      );
+      expect((res.body as Buffer).equals(bytes.subarray(10, 50))).toBe(true);
+    });
+
+    it('still forces a download with ?download=1 on a PDF, unchanged from the plain-file path', async () => {
+      const bytes = makePdfBytes();
+      const att = await uploadAndLinkPdf(bytes, 'my report.pdf');
+
+      const res = await alice.agent
+        .get(`/api/attachments/${att.id}?download=1`)
+        .buffer(true)
+        .parse(binaryParser);
+
+      expect(res.status).toBe(200);
+      expect(res.headers['content-type']).toBe('application/octet-stream');
+      expect(res.headers['content-disposition']).toBe(
+        "attachment; filename*=UTF-8''my%20report.pdf",
+      );
+      expect(res.headers['content-security-policy']).toBe('sandbox');
+      expect((res.body as Buffer).equals(bytes)).toBe(true);
+    });
+
+    it('does not render a lying-mime file inline (no %PDF- magic bytes)', async () => {
+      // An .html file uploaded with a spoofed application/pdf mime — magic
+      // bytes don't match, so it falls back to the normal opaque-file path.
+      const bytes = Buffer.from('<html><body>not a pdf</body></html>');
+      const att = await uploadAndLinkPdf(bytes, 'fake.pdf');
+
+      const res = await bob.agent.get(`/api/attachments/${att.id}`);
+
+      expect(res.status).toBe(200);
+      expect(res.headers['content-type']).toBe('application/octet-stream');
+      expect(res.headers['content-disposition']).toBe('attachment');
+      expect(res.headers['content-security-policy']).toBe('sandbox');
+    });
+
+    it('keeps non-PDF files on the exact prior octet-stream/attachment/sandbox behavior (regression)', async () => {
+      const bytes = randomBytes(2048);
+      const up = await upload(alice, group, bytes, 'data.bin', 'application/octet-stream');
+      const att = up.body.attachment as AttachmentDTO;
+      await alice.agent
+        .post(`/api/chats/${group}/messages`)
+        .send({ content: '', attachmentIds: [att.id] });
+
+      const res = await bob.agent.get(`/api/attachments/${att.id}`);
+
+      expect(res.status).toBe(200);
+      expect(res.headers['content-type']).toBe('application/octet-stream');
+      expect(res.headers['content-disposition']).toBe('attachment');
+      expect(res.headers['x-content-type-options']).toBe('nosniff');
+      expect(res.headers['content-security-policy']).toBe('sandbox');
+    });
+  });
 });
 
 describe('buildPushPayload — attachment previews', () => {

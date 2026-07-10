@@ -8,6 +8,7 @@ import { createDb } from './db/index.js';
 import { createChatEvents } from './events.js';
 import { initLinkPreviews } from './link-previews.js';
 import { initPush } from './push.js';
+import { startScheduledDispatcher } from './scheduled.js';
 import { initSocket } from './socket.js';
 import { createStorage } from './storage.js';
 import { initWebhooks } from './webhooks.js';
@@ -51,6 +52,11 @@ initWebhooks(db, events);
 // Link previews: fetches Open Graph metadata for the first URL in a message
 // and attaches it via a follow-up `message:updated` (see link-previews.ts).
 initLinkPreviews(db, events);
+
+// Send-later dispatcher: sweeps due scheduled_messages at boot + every 30s and
+// sends them through the same createMessage path (so sockets/push/webhooks fire
+// as if sent live). Timer is unref'd, so it never holds the process open.
+startScheduledDispatcher(db, events);
 
 // In production the container serves the built client from ../client/dist.
 if (process.env.NODE_ENV === 'production') {

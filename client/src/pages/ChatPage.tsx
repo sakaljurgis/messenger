@@ -4,12 +4,14 @@ import {
   REACTION_EMOJIS,
   type AttachmentDTO,
   type ChatMemberDTO,
+  type MessageActionDTO,
   type MessageDTO,
   type ReactionGroupDTO,
   type LinkPreviewDTO,
   type ReplyToDTO,
   type UserDTO,
 } from '@messenger/shared';
+import { apiPost } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { MessageMarkdown } from '../lib/markdown';
 import {
@@ -325,6 +327,67 @@ function ReactionChips({
   );
 }
 
+/** Tailwind classes per action style: primary = the app blue, danger = red
+ *  accent, default = neutral gray. Each has a dark variant. */
+function actionButtonClasses(style: MessageActionDTO['style']): string {
+  if (style === 'primary') {
+    return 'bg-[#0084ff] text-white hover:bg-[#0079f2]';
+  }
+  if (style === 'danger') {
+    return 'bg-red-500 text-white hover:bg-red-600 dark:bg-red-600 dark:hover:bg-red-500';
+  }
+  return 'bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600';
+}
+
+/**
+ * The row of tappable action buttons under a bot message's bubble (bot messages
+ * only — humans never carry `actions`; tombstones drop them server-side, so
+ * this never renders on a deleted message). Each button POSTs the tap
+ * fire-and-forget via `onTrigger`; a per-button busy flag disables it for the
+ * duration so a double-tap can't double-fire, and clears on completion (success
+ * OR failure — the bot's reply arriving over the socket is the real feedback).
+ * Wraps to multiple lines when six buttons don't fit a narrow screen.
+ */
+function MessageActionButtons({
+  actions,
+  onTrigger,
+}: {
+  actions: MessageActionDTO[];
+  onTrigger: (actionId: string) => Promise<void>;
+}) {
+  const [busy, setBusy] = useState<ReadonlySet<string>>(() => new Set());
+  return (
+    <div className="mt-1 flex flex-wrap gap-1.5">
+      {actions.map((action) => {
+        const isBusy = busy.has(action.id);
+        return (
+          <button
+            key={action.id}
+            type="button"
+            disabled={isBusy}
+            onClick={() => {
+              if (busy.has(action.id)) return;
+              setBusy((prev) => new Set(prev).add(action.id));
+              void onTrigger(action.id).finally(() =>
+                setBusy((prev) => {
+                  const next = new Set(prev);
+                  next.delete(action.id);
+                  return next;
+                }),
+              );
+            }}
+            className={`rounded-full px-3 py-1.5 text-sm font-medium transition-colors disabled:opacity-60 ${actionButtonClasses(
+              action.style,
+            )}`}
+          >
+            {action.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 /** Precomputed per-message layout: run grouping + day breaks. */
 interface Row {
   message: MessageDTO;
@@ -482,20 +545,30 @@ function AttachmentAudio({ audio }: { audio: AttachmentDTO }) {
   );
 }
 
-/** Non-image attachment: a download card styled like the message bubble. */
+/**
+ * Non-image attachment: a download card styled like the message bubble. A PDF
+ * is the one exception — the server serves it inline (Content-Disposition:
+ * inline), so instead of forcing a download it opens in a new tab in the
+ * browser's native PDF viewer: no `?download=1`, no `download` attribute,
+ * `target="_blank"` (so the thread stays open behind it). The subtitle swaps
+ * to "PDF · <size>" as a small visual hint that it opens rather than saves.
+ * Every other file type keeps the plain download behavior unchanged.
+ */
 function AttachmentFile({ file, isMine }: { file: AttachmentDTO; isMine: boolean }) {
   const bubble = isMine ? 'bg-[#0084ff] text-white' : 'bg-gray-200 text-gray-900 dark:bg-gray-700 dark:text-gray-100';
   const sub = isMine ? 'text-white/70' : 'text-gray-500 dark:text-gray-400';
+  const isPdf = file.mimeType === 'application/pdf';
+  const linkProps = isPdf
+    ? { href: attachmentUrl(file.id), target: '_blank', rel: 'noopener noreferrer' }
+    : { href: attachmentUrl(file.id, { download: true }), download: file.originalName };
   return (
-    <a
-      href={attachmentUrl(file.id, { download: true })}
-      download={file.originalName}
-      className={`flex max-w-[16rem] items-center gap-3 rounded-2xl px-3 py-2 ${bubble}`}
-    >
+    <a {...linkProps} className={`flex max-w-[16rem] items-center gap-3 rounded-2xl px-3 py-2 ${bubble}`}>
       <FileIcon />
       <span className="flex min-w-0 flex-col">
         <span className="truncate font-medium">{file.originalName}</span>
-        <span className={`text-xs ${sub}`}>{formatBytes(file.sizeBytes)}</span>
+        <span className={`text-xs ${sub}`}>
+          {isPdf ? `PDF · ${formatBytes(file.sizeBytes)}` : formatBytes(file.sizeBytes)}
+        </span>
       </span>
     </a>
   );
@@ -551,6 +624,7 @@ function MessageStack({
   isMine,
   onOpenImage,
   onJumpToMessage,
+  onTriggerAction,
 }: {
   message: MessageDTO;
   members: UserDTO[];
@@ -558,6 +632,7 @@ function MessageStack({
   isMine: boolean;
   onOpenImage: (a: AttachmentDTO) => void;
   onJumpToMessage: (messageId: number) => void;
+  onTriggerAction: (actionId: string) => Promise<void>;
 }) {
   const images = message.attachments.filter((a) => a.kind === 'image');
   const videos = message.attachments.filter((a) => a.kind === 'video');
@@ -593,6 +668,9 @@ function MessageStack({
         </div>
       )}
       {message.linkPreview && <LinkPreviewCard preview={message.linkPreview} />}
+      {message.actions && message.actions.length > 0 && (
+        <MessageActionButtons actions={message.actions} onTrigger={onTriggerAction} />
+      )}
     </div>
   );
 }
@@ -712,6 +790,7 @@ function MessageRow({
   onCopy,
   onReply,
   onJumpToMessage,
+  onTriggerAction,
 }: {
   row: Row;
   members: UserDTO[];
@@ -724,6 +803,7 @@ function MessageRow({
   onCopy: (message: MessageDTO) => void;
   onReply: (message: MessageDTO) => void;
   onJumpToMessage: (messageId: number) => void;
+  onTriggerAction: (messageId: number, actionId: string) => Promise<void>;
 }) {
   const { message, isMine, showSender, showAvatar, showTime, isRunStart } = row;
   const spacing = isRunStart ? 'mt-3' : 'mt-0.5';
@@ -755,6 +835,7 @@ function MessageRow({
                 isMine
                 onOpenImage={onOpenImage}
                 onJumpToMessage={onJumpToMessage}
+                onTriggerAction={(actionId) => onTriggerAction(message.id, actionId)}
               />
             </MessageActions>
           )}
@@ -819,6 +900,7 @@ function MessageRow({
                 isMine={false}
                 onOpenImage={onOpenImage}
                 onJumpToMessage={onJumpToMessage}
+                onTriggerAction={(actionId) => onTriggerAction(message.id, actionId)}
               />
             </MessageActions>
           )}
@@ -1021,6 +1103,21 @@ export default function ChatPage() {
   const [newMessageCount, setNewMessageCount] = useState(0);
   const prevNewestIdRef = useRef<number | null>(null);
 
+  // Auto-load older/newer: an IntersectionObserver sentinel near each edge of
+  // the loaded window triggers the next page fetch just before the user
+  // reaches it (rootMargin below). Falls back to the old manual buttons when
+  // IntersectionObserver doesn't exist (ancient browsers) — checked once at
+  // mount since the global never changes mid-session.
+  const [hasIntersectionObserver] = useState(() => typeof IntersectionObserver !== 'undefined');
+  const topSentinelRef = useRef<HTMLDivElement>(null);
+  const bottomSentinelRef = useRef<HTMLDivElement>(null); // "load newer" edge, windowed mode only
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [loadingNewer, setLoadingNewer] = useState(false);
+  // Synchronous guards (state lags a tick behind an in-flight fetch) so a burst
+  // of intersection entries can never kick off a second overlapping load.
+  const loadingOlderRef = useRef(false);
+  const loadingNewerRef = useRef(false);
+
   const isGroup = chat?.type === 'group';
   const title = chat ? chatTitle(chat, meId) : 'Chat';
   const members = chat?.members ?? [];
@@ -1163,6 +1260,47 @@ export default function ChatPage() {
     return () => observer.disconnect();
   }, [chatId]);
 
+  // Auto-load older: observe the top sentinel only while there IS an older
+  // page (hasMore) — this is what stops the loop that would otherwise fire
+  // forever once there's nothing left to fetch, and it's also why a short
+  // thread with no more history never mounts (or observes) the sentinel at
+  // all. rootMargin extends the scroller's top edge by 200px so the fetch
+  // starts just before the user physically reaches it. Re-runs (disconnect +
+  // re-observe) whenever `hasMore` flips, which covers both "ran out of
+  // history" and "switched chats". jsdom has no IntersectionObserver — the
+  // effect no-ops there, same pattern as the ResizeObserver effect above.
+  useEffect(() => {
+    if (typeof IntersectionObserver === 'undefined') return;
+    if (!hasMore) return;
+    const el = topSentinelRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) void handleLoadOlder();
+      },
+      { root: scrollRef.current, rootMargin: '200px 0px 0px 0px' },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [hasMore]);
+
+  // Auto-load newer: the mirror of the above for the bottom edge, only
+  // meaningful in windowed (focus) mode — observed only while `!atLiveEdge`.
+  useEffect(() => {
+    if (typeof IntersectionObserver === 'undefined') return;
+    if (atLiveEdge) return;
+    const el = bottomSentinelRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) void handleLoadNewer();
+      },
+      { root: scrollRef.current, rootMargin: '0px 0px 200px 0px' },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [atLiveEdge]);
+
   // Reset the jump-to-bottom pill's per-chat counters when the chat or focus
   // target changes. The unread-boundary freeze above self-heals via the
   // chatId/messages guard, but the append counter has no equivalent reset.
@@ -1207,14 +1345,34 @@ export default function ChatPage() {
   }, [chatId, messages, atLiveEdge]);
 
   async function handleLoadOlder() {
+    if (loadingOlderRef.current) return;
+    loadingOlderRef.current = true;
+    setLoadingOlder(true);
     const el = scrollRef.current;
     const prevHeight = el?.scrollHeight ?? 0;
-    await loadOlder();
-    // Keep the viewport anchored on the same message after prepending.
-    requestAnimationFrame(() => {
-      const el2 = scrollRef.current;
-      if (el2) el2.scrollTop = el2.scrollHeight - prevHeight;
-    });
+    try {
+      await loadOlder();
+      // Keep the viewport anchored on the same message after prepending.
+      requestAnimationFrame(() => {
+        const el2 = scrollRef.current;
+        if (el2) el2.scrollTop = el2.scrollHeight - prevHeight;
+      });
+    } finally {
+      loadingOlderRef.current = false;
+      setLoadingOlder(false);
+    }
+  }
+
+  async function handleLoadNewer() {
+    if (loadingNewerRef.current) return;
+    loadingNewerRef.current = true;
+    setLoadingNewer(true);
+    try {
+      await loadNewer();
+    } finally {
+      loadingNewerRef.current = false;
+      setLoadingNewer(false);
+    }
   }
 
   /** Drop the `?message=` focus param, returning to (and re-fetching) the live
@@ -1315,6 +1473,20 @@ export default function ChatPage() {
     void navigator.clipboard.writeText(message.content).catch(() => {});
   }
 
+  /**
+   * Tap a bot message's action button: POST { actionId } (204). Fire-and-forget
+   * — the bot's reply arrives over the socket, so a failure just re-enables the
+   * button (swallowed here; MessageActionButtons clears its busy flag). Returns
+   * the promise so the button can track its own in-flight/busy state.
+   */
+  function handleTriggerAction(messageId: number, actionId: string): Promise<void> {
+    return apiPost<void>(`/api/chats/${chatId}/messages/${messageId}/actions`, { actionId }).catch(
+      () => {
+        /* transient failure — the button re-enables; the bot's reply is the real feedback */
+      },
+    );
+  }
+
   async function handleEditSubmit(messageId: number, content: string, mentions: number[]) {
     await editMessage(messageId, content, mentions);
     setEditing(null);
@@ -1366,17 +1538,27 @@ export default function ChatPage() {
           {/* Wrapper so the growth-repin ResizeObserver can watch the content's
               height (observing the scroller itself only reports its fixed box). */}
           <div ref={contentRef}>
-          {hasMore && (
-            <div className="flex justify-center py-2">
-              <button
-                type="button"
-                onClick={handleLoadOlder}
-                className="rounded-full bg-gray-100 px-4 py-1 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700"
-              >
-                Load older
-              </button>
-            </div>
-          )}
+          {hasMore &&
+            (hasIntersectionObserver ? (
+              <>
+                <div ref={topSentinelRef} data-testid="top-sentinel" aria-hidden="true" className="h-px" />
+                {loadingOlder && (
+                  <div className="flex justify-center py-2" role="status" aria-label="Loading older messages">
+                    <div className="h-5 w-5 animate-spin rounded-full border-2 border-gray-200 border-t-[#0084ff] dark:border-gray-700 dark:border-t-[#0084ff]" />
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="flex justify-center py-2">
+                <button
+                  type="button"
+                  onClick={() => void handleLoadOlder()}
+                  className="rounded-full bg-gray-100 px-4 py-1 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700"
+                >
+                  Load older
+                </button>
+              </div>
+            ))}
 
           {loading && messages.length === 0 ? (
             <div className="flex justify-center py-10" role="status" aria-label="Loading messages">
@@ -1413,6 +1595,7 @@ export default function ChatPage() {
                   onCopy={handleCopy}
                   onReply={startReply}
                   onJumpToMessage={jumpToMessage}
+                  onTriggerAction={handleTriggerAction}
                 />
                 <ReadReceipts members={receiptsByMessageId.get(row.message.id) ?? []} />
               </div>
@@ -1421,17 +1604,28 @@ export default function ChatPage() {
 
           {/* Mirror of "Load older" for the newer side — only present in a
               windowed (focus-mode) view that hasn't reached the present yet. */}
-          {!atLiveEdge && messages.length > 0 && (
-            <div className="flex justify-center py-2">
-              <button
-                type="button"
-                onClick={() => void loadNewer()}
-                className="rounded-full bg-gray-100 px-4 py-1 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700"
-              >
-                Load newer
-              </button>
-            </div>
-          )}
+          {!atLiveEdge &&
+            messages.length > 0 &&
+            (hasIntersectionObserver ? (
+              <>
+                {loadingNewer && (
+                  <div className="flex justify-center py-2" role="status" aria-label="Loading newer messages">
+                    <div className="h-5 w-5 animate-spin rounded-full border-2 border-gray-200 border-t-[#0084ff] dark:border-gray-700 dark:border-t-[#0084ff]" />
+                  </div>
+                )}
+                <div ref={bottomSentinelRef} data-testid="bottom-sentinel" aria-hidden="true" className="h-px" />
+              </>
+            ) : (
+              <div className="flex justify-center py-2">
+                <button
+                  type="button"
+                  onClick={() => void handleLoadNewer()}
+                  className="rounded-full bg-gray-100 px-4 py-1 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700"
+                >
+                  Load newer
+                </button>
+              </div>
+            ))}
 
           {/* Optimistic bubbles for text sends queued while offline. Live edge
               only — a windowed view suppresses them (like live message:new). */}
