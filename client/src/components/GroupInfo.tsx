@@ -122,18 +122,18 @@ export default function GroupInfo({
   }
 
   return (
-    <div className="fixed inset-0 z-40 flex justify-center bg-white">
+    <div className="fixed inset-0 z-40 flex justify-center bg-white dark:bg-gray-900">
       <div className="flex h-full w-full max-w-xl flex-col">
-        <header className="flex flex-shrink-0 items-center gap-2 border-b border-gray-200 px-2 py-2">
+        <header className="flex flex-shrink-0 items-center gap-2 border-b border-gray-200 px-2 py-2 dark:border-gray-700">
           <button
             type="button"
             onClick={onClose}
             aria-label="Close group info"
-            className="flex h-9 w-9 items-center justify-center rounded-full text-gray-600 transition-colors hover:bg-gray-100"
+            className="flex h-9 w-9 items-center justify-center rounded-full text-gray-600 transition-colors hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-800"
           >
             <CloseIcon />
           </button>
-          <h1 className="font-semibold text-gray-900">Group info</h1>
+          <h1 className="font-semibold text-gray-900 dark:text-gray-100">Group info</h1>
         </header>
 
         <div className="min-h-0 flex-1 overflow-y-auto p-3">
@@ -150,7 +150,7 @@ export default function GroupInfo({
                   value={nameDraft}
                   onChange={(e) => setNameDraft(e.target.value)}
                   autoFocus
-                  className="w-full min-w-0 rounded-full border border-gray-300 px-3 py-1.5 text-gray-900 focus:border-[#0084ff] focus:outline-none"
+                  className="w-full min-w-0 rounded-full border border-gray-300 px-3 py-1.5 text-gray-900 focus:border-[#0084ff] focus:outline-none dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100"
                 />
                 <button
                   type="submit"
@@ -162,7 +162,7 @@ export default function GroupInfo({
                 <button
                   type="button"
                   onClick={() => setRenaming(false)}
-                  className="flex-shrink-0 rounded-full px-2 py-1.5 text-sm font-semibold text-gray-600"
+                  className="flex-shrink-0 rounded-full px-2 py-1.5 text-sm font-semibold text-gray-600 dark:text-gray-300"
                 >
                   Cancel
                 </button>
@@ -170,26 +170,26 @@ export default function GroupInfo({
             ) : (
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
-                  <h2 className="truncate text-lg font-bold text-gray-900">
+                  <h2 className="truncate text-lg font-bold text-gray-900 dark:text-gray-100">
                     {chat.name ?? 'Group'}
                   </h2>
                   <button
                     type="button"
                     onClick={() => setRenaming(true)}
                     aria-label="Rename group"
-                    className="flex-shrink-0 rounded-full px-2 py-0.5 text-sm font-semibold text-[#0084ff] transition-colors hover:bg-gray-100"
+                    className="flex-shrink-0 rounded-full px-2 py-0.5 text-sm font-semibold text-[#0084ff] transition-colors hover:bg-gray-100 dark:hover:bg-gray-800"
                   >
                     Rename
                   </button>
                 </div>
-                <p className="text-sm text-gray-500">{chat.members.length} members</p>
+                <p className="text-sm text-gray-500 dark:text-gray-400">{chat.members.length} members</p>
               </div>
             )}
           </div>
 
-          {error && <p className="pb-2 text-sm text-red-600">{error}</p>}
+          {error && <p className="pb-2 text-sm text-red-600 dark:text-red-400">{error}</p>}
 
-          <h3 className="px-1 pb-1 text-xs font-semibold uppercase tracking-wide text-gray-400">
+          <h3 className="px-1 pb-1 text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">
             Members
           </h3>
           <ul className="mb-4 flex flex-col">
@@ -200,12 +200,12 @@ export default function GroupInfo({
                   id={member.id}
                   online={member.id !== meId && onlineIds.has(member.id)}
                 />
-                <span className="flex-1 truncate font-medium text-gray-900">
+                <span className="flex-1 truncate font-medium text-gray-900 dark:text-gray-100">
                   {member.displayName}
-                  {member.id === meId && <span className="ml-1 text-sm text-gray-400">(you)</span>}
+                  {member.id === meId && <span className="ml-1 text-sm text-gray-400 dark:text-gray-500">(you)</span>}
                 </span>
                 {member.isBot && (
-                  <span className="rounded-full bg-gray-200 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-gray-600">
+                  <span className="rounded-full bg-gray-200 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-gray-600 dark:bg-gray-700 dark:text-gray-300">
                     Bot
                   </span>
                 )}
@@ -214,7 +214,7 @@ export default function GroupInfo({
           </ul>
 
           <div className="flex items-center justify-between px-1 pb-1">
-            <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">
               Add members
             </h3>
             {addable.length > 0 && (
@@ -229,9 +229,9 @@ export default function GroupInfo({
             )}
           </div>
           {directory === null ? (
-            <p className="mb-4 px-1 text-sm text-gray-400">Loading people…</p>
+            <p className="mb-4 px-1 text-sm text-gray-400 dark:text-gray-500">Loading people…</p>
           ) : addable.length === 0 ? (
-            <p className="mb-4 px-1 text-sm text-gray-400">
+            <p className="mb-4 px-1 text-sm text-gray-400 dark:text-gray-500">
               Everyone is already in this group.
             </p>
           ) : (
@@ -244,17 +244,17 @@ export default function GroupInfo({
                         type="button"
                         onClick={() => toggle(user.id)}
                         aria-pressed={checked}
-                        className="flex w-full items-center gap-3 rounded-xl px-2 py-2 text-left transition-colors hover:bg-gray-50"
+                        className="flex w-full items-center gap-3 rounded-xl px-2 py-2 text-left transition-colors hover:bg-gray-50 dark:hover:bg-gray-800"
                       >
                         <Avatar name={user.displayName} id={user.id} />
-                        <span className="flex-1 truncate font-medium text-gray-900">
+                        <span className="flex-1 truncate font-medium text-gray-900 dark:text-gray-100">
                           {user.displayName}
                         </span>
                         <span
                           className={`flex h-6 w-6 items-center justify-center rounded-full border ${
                             checked
                               ? 'border-[#0084ff] bg-[#0084ff] text-white'
-                              : 'border-gray-300 text-transparent'
+                              : 'border-gray-300 text-transparent dark:border-gray-600'
                           }`}
                         >
                           <CheckIcon />
@@ -270,7 +270,7 @@ export default function GroupInfo({
             type="button"
             onClick={leave}
             disabled={busy}
-            className="w-full rounded-xl px-4 py-3 text-left font-medium text-red-600 transition-colors hover:bg-red-50 disabled:opacity-60"
+            className="w-full rounded-xl px-4 py-3 text-left font-medium text-red-600 transition-colors hover:bg-red-50 disabled:opacity-60 dark:text-red-400 dark:hover:bg-red-500/10"
           >
             Leave group
           </button>

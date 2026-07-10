@@ -165,3 +165,48 @@ describe('SettingsPage — profile', () => {
     expect(link).toHaveAttribute('href', '/bots');
   });
 });
+
+describe('SettingsPage — theme', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.clearAllMocks();
+    localStorage.clear();
+    document.documentElement.classList.remove('dark');
+  });
+
+  it('defaults to System and switches theme, applying the html class and persisting', async () => {
+    push.getPushState.mockResolvedValue('disabled');
+    renderSettings();
+
+    const system = await screen.findByRole('radio', { name: 'System' });
+    const light = screen.getByRole('radio', { name: 'Light' });
+    const dark = screen.getByRole('radio', { name: 'Dark' });
+
+    // Nothing stored → System is the selected option, no dark class.
+    expect(system).toHaveAttribute('aria-checked', 'true');
+    expect(dark).toHaveAttribute('aria-checked', 'false');
+    expect(document.documentElement.classList.contains('dark')).toBe(false);
+
+    // Dark applies immediately and persists.
+    await userEvent.click(dark);
+    expect(dark).toHaveAttribute('aria-checked', 'true');
+    expect(system).toHaveAttribute('aria-checked', 'false');
+    expect(document.documentElement.classList.contains('dark')).toBe(true);
+    expect(localStorage.getItem('theme')).toBe('dark');
+
+    // Light removes the class and updates the stored choice.
+    await userEvent.click(light);
+    expect(light).toHaveAttribute('aria-checked', 'true');
+    expect(document.documentElement.classList.contains('dark')).toBe(false);
+    expect(localStorage.getItem('theme')).toBe('light');
+  });
+
+  it('preselects the stored theme on load', async () => {
+    push.getPushState.mockResolvedValue('disabled');
+    localStorage.setItem('theme', 'dark');
+    renderSettings();
+
+    const dark = await screen.findByRole('radio', { name: 'Dark' });
+    expect(dark).toHaveAttribute('aria-checked', 'true');
+  });
+});

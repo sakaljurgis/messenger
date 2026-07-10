@@ -31,7 +31,7 @@ export default function LoginPage() {
 
   return (
     <div className="flex min-h-full items-center justify-center p-4">
-      <div className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-sm">
+      <div className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-sm dark:bg-gray-800 dark:shadow-none">
         <h1 className="mb-6 text-center text-2xl font-bold text-[#0084ff]">Messenger</h1>
         <form className="flex flex-col gap-3" onSubmit={handleSubmit}>
           <label className="sr-only" htmlFor="login-email">
@@ -45,7 +45,7 @@ export default function LoginPage() {
             placeholder="Email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            className="rounded-full border border-gray-300 px-4 py-2.5 text-gray-900 focus:border-[#0084ff] focus:outline-none"
+            className="rounded-full border border-gray-300 px-4 py-2.5 text-gray-900 focus:border-[#0084ff] focus:outline-none dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 dark:placeholder:text-gray-400"
           />
           <label className="sr-only" htmlFor="login-password">
             Password
@@ -58,9 +58,9 @@ export default function LoginPage() {
             placeholder="Password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            className="rounded-full border border-gray-300 px-4 py-2.5 text-gray-900 focus:border-[#0084ff] focus:outline-none"
+            className="rounded-full border border-gray-300 px-4 py-2.5 text-gray-900 focus:border-[#0084ff] focus:outline-none dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 dark:placeholder:text-gray-400"
           />
-          {error && <p className="text-center text-sm text-red-600">{error}</p>}
+          {error && <p className="text-center text-sm text-red-600 dark:text-red-400">{error}</p>}
           <button
             type="submit"
             disabled={submitting}
@@ -69,7 +69,7 @@ export default function LoginPage() {
             {submitting ? 'Logging in…' : 'Log in'}
           </button>
         </form>
-        <p className="mt-4 text-center text-sm text-gray-500">
+        <p className="mt-4 text-center text-sm text-gray-500 dark:text-gray-400">
           No account?{' '}
           <Link to="/register" className="font-semibold text-[#0084ff]">
             Register

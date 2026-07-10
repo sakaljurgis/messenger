@@ -8,7 +8,7 @@ export default function RequireAuth() {
     return (
       <div className="flex h-full items-center justify-center">
         <div
-          className="h-8 w-8 animate-spin rounded-full border-4 border-gray-200 border-t-[#0084ff]"
+          className="h-8 w-8 animate-spin rounded-full border-4 border-gray-200 border-t-[#0084ff] dark:border-gray-700 dark:border-t-[#0084ff]"
           role="status"
           aria-label="Loading"
         />

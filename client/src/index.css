@@ -1,8 +1,21 @@
 @import "tailwindcss";
 
+/* Class-based dark mode: styles apply under `.dark` on <html> (toggled by
+   src/lib/theme.ts), rather than following prefers-color-scheme directly, so
+   the in-app System/Light/Dark toggle can override the OS. */
+@custom-variant dark (&:where(.dark, .dark *));
+
 /* App-wide defaults */
 html,
 body,
 #root {
   height: 100%;
+}
+
+/* Dark-mode base: covers the body behind full-screen pages (Login/Register/Chat)
+   and gives any element without an explicit color a legible default so nothing
+   flashes white. Per-element `dark:` classes refine on top of this. */
+.dark body {
+  background-color: #111827; /* gray-900 */
+  color: #f3f4f6; /* gray-100 */
 }

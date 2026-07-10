@@ -4,9 +4,10 @@ import type { UserDTO } from '@messenger/shared';
 import { apiPatch, apiPut } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { disablePush, enablePush, getPushState, type PushState } from '../lib/push';
+import { getStoredTheme, setTheme, type Theme } from '../lib/theme';
 
 const inputClass =
-  'w-full rounded-full border border-gray-300 px-4 py-2 text-gray-900 focus:border-[#0084ff] focus:outline-none';
+  'w-full rounded-full border border-gray-300 px-4 py-2 text-gray-900 focus:border-[#0084ff] focus:outline-none dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100';
 const saveButtonClass =
   'rounded-full bg-[#0084ff] px-4 py-2 text-sm font-semibold text-white transition-opacity disabled:opacity-40';
 
@@ -46,10 +47,10 @@ function ProfileSection() {
 
   return (
     <section className="mb-6">
-      <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">Profile</h2>
-      <form onSubmit={save} className="space-y-3 rounded-xl bg-gray-50 p-4">
+      <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Profile</h2>
+      <form onSubmit={save} className="space-y-3 rounded-xl bg-gray-50 p-4 dark:bg-gray-800">
         <div>
-          <label htmlFor="display-name" className="mb-1 block text-sm font-medium text-gray-700">
+          <label htmlFor="display-name" className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200">
             Display name
           </label>
           <input
@@ -63,9 +64,9 @@ function ProfileSection() {
             className={inputClass}
           />
         </div>
-        <p className="text-sm text-gray-500">{user?.email}</p>
-        {error && <p className="text-sm text-red-600">{error}</p>}
-        {saved && <p className="text-sm text-green-600">Name updated</p>}
+        <p className="text-sm text-gray-500 dark:text-gray-400">{user?.email}</p>
+        {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
+        {saved && <p className="text-sm text-green-600 dark:text-green-400">Name updated</p>}
         <button type="submit" disabled={!canSave} className={saveButtonClass}>
           {busy ? 'Saving…' : 'Save name'}
         </button>
@@ -104,10 +105,10 @@ function PasswordSection() {
 
   return (
     <section className="mb-6">
-      <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">Password</h2>
-      <form onSubmit={save} className="space-y-3 rounded-xl bg-gray-50 p-4">
+      <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Password</h2>
+      <form onSubmit={save} className="space-y-3 rounded-xl bg-gray-50 p-4 dark:bg-gray-800">
         <div>
-          <label htmlFor="current-password" className="mb-1 block text-sm font-medium text-gray-700">
+          <label htmlFor="current-password" className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200">
             Current password
           </label>
           <input
@@ -120,7 +121,7 @@ function PasswordSection() {
           />
         </div>
         <div>
-          <label htmlFor="new-password" className="mb-1 block text-sm font-medium text-gray-700">
+          <label htmlFor="new-password" className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200">
             New password
           </label>
           <input
@@ -131,10 +132,10 @@ function PasswordSection() {
             onChange={(e) => setNewPassword(e.target.value)}
             className={inputClass}
           />
-          <p className="mt-1 text-xs text-gray-400">At least 8 characters.</p>
+          <p className="mt-1 text-xs text-gray-400 dark:text-gray-500">At least 8 characters.</p>
         </div>
-        {error && <p className="text-sm text-red-600">{error}</p>}
-        {saved && <p className="text-sm text-green-600">Password changed</p>}
+        {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
+        {saved && <p className="text-sm text-green-600 dark:text-green-400">Password changed</p>}
         <button type="submit" disabled={!canSave} className={saveButtonClass}>
           {busy ? 'Saving…' : 'Change password'}
         </button>
@@ -191,15 +192,15 @@ function NotificationsSection() {
 
   return (
     <section className="mb-6">
-      <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">
+      <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
         Notifications
       </h2>
-      <div className="rounded-xl bg-gray-50 p-4">
+      <div className="rounded-xl bg-gray-50 p-4 dark:bg-gray-800">
         {state === null ? (
-          <p className="text-sm text-gray-400">Checking notification status…</p>
+          <p className="text-sm text-gray-400 dark:text-gray-500">Checking notification status…</p>
         ) : (
           <>
-            <p className="mb-3 text-sm text-gray-600">{stateText(state)}</p>
+            <p className="mb-3 text-sm text-gray-600 dark:text-gray-300">{stateText(state)}</p>
             {canToggle && (
               <button
                 type="button"
@@ -222,6 +223,54 @@ function NotificationsSection() {
   );
 }
 
+const THEME_OPTIONS: { value: Theme; label: string }[] = [
+  { value: 'system', label: 'System' },
+  { value: 'light', label: 'Light' },
+  { value: 'dark', label: 'Dark' },
+];
+
+/** App appearance: System (follow the OS) / Light / Dark. Applies immediately
+ *  (setTheme toggles the html class) and persists to localStorage. */
+function ThemeSection() {
+  const [theme, setThemeState] = useState<Theme>(() => getStoredTheme());
+
+  function choose(next: Theme) {
+    setTheme(next);
+    setThemeState(next);
+  }
+
+  return (
+    <section className="mb-6">
+      <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+        Theme
+      </h2>
+      <div className="rounded-xl bg-gray-50 p-4 dark:bg-gray-800">
+        <div className="grid grid-cols-3 gap-2" role="radiogroup" aria-label="Theme">
+          {THEME_OPTIONS.map((option) => {
+            const active = theme === option.value;
+            return (
+              <button
+                key={option.value}
+                type="button"
+                role="radio"
+                aria-checked={active}
+                onClick={() => choose(option.value)}
+                className={`rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${
+                  active
+                    ? 'bg-[#0084ff] text-white'
+                    : 'bg-white text-gray-700 hover:bg-gray-100 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600'
+                }`}
+              >
+                {option.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 export default function SettingsPage() {
   const { logout } = useAuth();
   const navigate = useNavigate();
@@ -233,7 +282,7 @@ export default function SettingsPage() {
 
   return (
     <div className="p-4">
-      <h1 className="mb-4 text-xl font-bold">Settings</h1>
+      <h1 className="mb-4 text-xl font-bold text-gray-900 dark:text-gray-100">Settings</h1>
 
       <ProfileSection />
 
@@ -241,14 +290,16 @@ export default function SettingsPage() {
 
       <NotificationsSection />
 
+      <ThemeSection />
+
       <section className="mb-6">
-        <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">Bots</h2>
+        <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Bots</h2>
         <Link
           to="/bots"
-          className="block rounded-xl bg-gray-50 p-4 transition-colors hover:bg-gray-100"
+          className="block rounded-xl bg-gray-50 p-4 transition-colors hover:bg-gray-100 dark:bg-gray-800 dark:hover:bg-gray-700"
         >
-          <p className="font-semibold text-gray-900">Manage bots</p>
-          <p className="text-sm text-gray-500">Create bots and edit their webhooks.</p>
+          <p className="font-semibold text-gray-900 dark:text-gray-100">Manage bots</p>
+          <p className="text-sm text-gray-500 dark:text-gray-400">Create bots and edit their webhooks.</p>
         </Link>
       </section>
 

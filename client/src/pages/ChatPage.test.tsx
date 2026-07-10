@@ -165,6 +165,19 @@ function fileAttachment(id: number, name = 'report.pdf', sizeBytes = 3_355_443):
   };
 }
 
+/** jsdom has no Clipboard API — stub navigator.clipboard.writeText for the
+ *  copy-action tests (cleaned up in the top-level afterEach). Defines just the
+ *  one property on the real navigator object rather than replacing it wholesale,
+ *  so userEvent's own navigator reads (userAgent, etc.) keep working. */
+function stubClipboard() {
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, 'clipboard', {
+    value: { writeText },
+    configurable: true,
+  });
+  return writeText;
+}
+
 /** Mock the scroll container's geometry and fire a scroll event reporting the
  *  viewport as far from the bottom (helper for jump-to-bottom-pill tests). */
 function scrollAwayFromBottom(scrollEl: HTMLElement) {
@@ -190,6 +203,7 @@ function renderChatPage() {
 describe('ChatPage', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    delete (navigator as unknown as { clipboard?: unknown }).clipboard;
   });
 
   it('renders fetched messages with mine right/blue and others left/gray', async () => {
@@ -718,6 +732,48 @@ describe('ChatPage', () => {
 
     // The new chip appears (highlighted, since it's now mine).
     expect(await screen.findByRole('button', { name: '👍 1, including you' })).toBeInTheDocument();
+  });
+
+  it('shows a Copy row and copies the message content to the clipboard', async () => {
+    stubFetch({ messages: [msg(2, me, 'copy me please')] });
+    const writeText = stubClipboard();
+    renderChatPage();
+
+    await screen.findByText('copy me please');
+
+    await userEvent.click(screen.getByLabelText('Message actions'));
+    expect(screen.getByRole('menuitem', { name: 'Copy' })).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Copy' }));
+
+    expect(writeText).toHaveBeenCalledWith('copy me please');
+    // Closes on tap like the other rows.
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+  });
+
+  it('does not show a Copy row for an attachment-only message', async () => {
+    const imgMsg: MessageDTO = { ...msg(1, bob, ''), attachments: [imageAttachment(42)] };
+    stubFetch({ messages: [imgMsg] });
+    renderChatPage();
+
+    await screen.findByAltText('photo.jpg');
+
+    await userEvent.click(screen.getByLabelText('Message actions'));
+    expect(screen.getByRole('menu')).toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: 'Copy' })).not.toBeInTheDocument();
+  });
+
+  it('shows a Copy row for received messages too, not just own', async () => {
+    stubFetch({ messages: [msg(1, bob, 'Hi from Bob')] });
+    const writeText = stubClipboard();
+    renderChatPage();
+
+    await screen.findByText('Hi from Bob');
+
+    await userEvent.click(screen.getByLabelText('Message actions'));
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Copy' }));
+
+    expect(writeText).toHaveBeenCalledWith('Hi from Bob');
   });
 
   it('anchors the actions popover inward: left on received messages, right on mine', async () => {

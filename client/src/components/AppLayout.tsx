@@ -45,13 +45,13 @@ const tabs = [
 
 export default function AppLayout() {
   return (
-    <div className="flex h-full flex-col bg-white">
+    <div className="flex h-full flex-col bg-white dark:bg-gray-900">
       <main className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto max-w-xl">
           <Outlet />
         </div>
       </main>
-      <nav className="flex-shrink-0 border-t border-gray-200 bg-white pb-[env(safe-area-inset-bottom)]">
+      <nav className="flex-shrink-0 border-t border-gray-200 bg-white pb-[env(safe-area-inset-bottom)] dark:border-gray-700 dark:bg-gray-900">
         <div className="mx-auto flex max-w-xl">
           {tabs.map(({ to, label, Icon }) => (
             <NavLink
@@ -59,7 +59,7 @@ export default function AppLayout() {
               to={to}
               className={({ isActive }) =>
                 `flex flex-1 flex-col items-center gap-0.5 py-2 text-xs transition-colors ${
-                  isActive ? 'text-[#0084ff]' : 'text-gray-400'
+                  isActive ? 'text-[#0084ff]' : 'text-gray-400 dark:text-gray-500'
                 }`
               }
             >

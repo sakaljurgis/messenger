@@ -4,6 +4,8 @@ import {
   useRef,
   useState,
   type ChangeEvent,
+  type ClipboardEvent,
+  type DragEvent,
   type FormEvent,
   type KeyboardEvent,
 } from 'react';
@@ -70,6 +72,43 @@ interface MentionState {
 
 /** Emit the "typing" signal at most once per this window while the user types. */
 const TYPING_THROTTLE_MS = 2000;
+
+/** Auto-grow the textarea up to this many pixels (~5 lines), then scroll inside. */
+const MAX_TEXTAREA_HEIGHT = 128;
+
+/** localStorage key holding the unsent draft for a chat. */
+function draftKey(chatId: number): string {
+  return `draft:chat:${chatId}`;
+}
+
+/** Read a chat's saved draft (or '' when none / storage is unavailable). */
+function loadDraft(chatId: number): string {
+  try {
+    return localStorage.getItem(draftKey(chatId)) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+/** Persist a chat's draft; an empty/blank value removes the key. Storage errors
+ *  (private mode, quota) are swallowed — a lost draft must never break sending. */
+function saveDraft(chatId: number, value: string): void {
+  try {
+    if (value.trim().length === 0) localStorage.removeItem(draftKey(chatId));
+    else localStorage.setItem(draftKey(chatId), value);
+  } catch {
+    // ignore
+  }
+}
+
+/** Drop a chat's draft entirely (on successful send). */
+function clearDraft(chatId: number): void {
+  try {
+    localStorage.removeItem(draftKey(chatId));
+  } catch {
+    // ignore
+  }
+}
 
 type PendingStatus = 'uploading' | 'done' | 'error';
 
@@ -153,14 +192,14 @@ function PendingTile({
   const uploading = item.status === 'uploading';
   const error = item.status === 'error';
   const percent = Math.round(item.progress * 100);
-  const errorRing = error ? 'border-2 border-red-500' : 'border border-gray-200';
+  const errorRing = error ? 'border-2 border-red-500' : 'border border-gray-200 dark:border-gray-700';
 
   const inner = item.previewUrl ? (
     <img src={item.previewUrl} alt={item.file.name} className="h-16 w-16 rounded-lg object-cover" />
   ) : (
-    <div className="flex h-16 w-28 items-center gap-2 rounded-lg bg-gray-100 px-2">
+    <div className="flex h-16 w-28 items-center gap-2 rounded-lg bg-gray-100 px-2 dark:bg-gray-700">
       <FileIcon />
-      <span className="min-w-0 truncate text-xs text-gray-700">{item.file.name}</span>
+      <span className="min-w-0 truncate text-xs text-gray-700 dark:text-gray-200">{item.file.name}</span>
     </div>
   );
 
@@ -174,7 +213,7 @@ function PendingTile({
           className="block"
         >
           {inner}
-          <span className="absolute inset-0 flex items-center justify-center bg-red-500/20 text-[10px] font-semibold text-red-700">
+          <span className="absolute inset-0 flex items-center justify-center bg-red-500/20 text-[10px] font-semibold text-red-700 dark:text-red-300">
             Retry
           </span>
         </button>
@@ -220,7 +259,7 @@ export default function Composer({
   const [pending, setPending] = useState<PendingAttachment[]>([]);
   const [hd, setHd] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   // Members the user explicitly selected; reconciled against the final text on
   // send (they may have deleted a mention) via extractMentions.
@@ -228,6 +267,10 @@ export default function Composer({
   // Mirror of `pending` for unmount cleanup (revoke object URLs).
   const pendingRef = useRef<PendingAttachment[]>([]);
   pendingRef.current = pending;
+  // Mirror of `text` so the failed-send restore can read the latest value
+  // (which may include typing that landed while the send was in flight).
+  const textRef = useRef(text);
+  textRef.current = text;
   // Throttle for the outgoing "typing" signal — at most one emit per window.
   const lastTypingEmit = useRef(0);
 
@@ -247,8 +290,9 @@ export default function Composer({
   const mentionPool = useMemo(() => members.filter((m) => m.id !== meId), [members, meId]);
 
   // Entering edit mode prefills the input with the message text and focuses it;
-  // leaving edit mode clears it. Keyed on the message id so switching between two
-  // edits re-prefills.
+  // leaving edit mode restores whatever draft was in flight before (the edit text
+  // is transient and is never saved as a draft). Keyed on the message id so
+  // switching between two edits re-prefills.
   useEffect(() => {
     if (editing) {
       setText(editing.content);
@@ -262,10 +306,29 @@ export default function Composer({
         }
       });
     } else {
-      setText('');
+      setText(loadDraft(chatId));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editingId]);
+
+  // Restore the saved draft when the chat changes (the composer may not remount
+  // on chat switch). Skipped while editing — the edit text owns the input then.
+  useEffect(() => {
+    if (editing) return;
+    setText(loadDraft(chatId));
+    setMention(null);
+    picked.current = [];
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatId]);
+
+  // Auto-grow the textarea to fit its content, up to MAX_TEXTAREA_HEIGHT; reset
+  // to a single row when cleared. (scrollHeight is 0 under jsdom — a no-op there.)
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, MAX_TEXTAREA_HEIGHT)}px`;
+  }, [text]);
 
   // Entering reply mode focuses the input (the text is left as-is so a half-typed
   // message survives; the quote banner shows what's being replied to).
@@ -306,9 +369,8 @@ export default function Composer({
     })();
   }
 
-  function handleFilePick(e: ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(e.target.files ?? []);
-    e.target.value = ''; // allow re-picking the same file later
+  /** Enqueue files (from the picker, a paste, or a drop) into the upload pipeline. */
+  function addFiles(files: File[]) {
     const currentHd = hd;
     for (const file of files) {
       const localId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -326,6 +388,36 @@ export default function Composer({
     }
   }
 
+  function handleFilePick(e: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files ?? []);
+    e.target.value = ''; // allow re-picking the same file later
+    addFiles(files);
+  }
+
+  /** Route pasted clipboard files (e.g. a screenshot) into the attachment pipeline. */
+  function handlePaste(e: ClipboardEvent<HTMLFormElement>) {
+    if (isEditing) return; // attachments aren't editable
+    const files = Array.from(e.clipboardData?.files ?? []);
+    if (files.length === 0) return; // plain-text paste → let the textarea handle it
+    e.preventDefault();
+    addFiles(files);
+  }
+
+  /** Accept files dropped onto the composer, same path as the file picker. */
+  function handleDrop(e: DragEvent<HTMLFormElement>) {
+    if (isEditing) return;
+    const files = Array.from(e.dataTransfer?.files ?? []);
+    if (files.length === 0) return;
+    e.preventDefault();
+    addFiles(files);
+  }
+
+  /** Allow a drop by preventing the browser's default (open-file) handling. */
+  function handleDragOver(e: DragEvent<HTMLFormElement>) {
+    if (isEditing) return;
+    e.preventDefault();
+  }
+
   function removePending(localId: string) {
     setPending((prev) => {
       const target = prev.find((p) => p.localId === localId);
@@ -340,6 +432,13 @@ export default function Composer({
     const reset: PendingAttachment = { ...target, status: 'uploading', progress: 0 };
     setPending((prev) => prev.map((p) => (p.localId === localId ? reset : p)));
     startUpload(reset);
+  }
+
+  /** Persist the current composer text as this chat's draft. No-op in edit mode:
+   *  the edited message text is transient and must not clobber the saved draft. */
+  function persistDraft(value: string) {
+    if (isEditing) return;
+    saveDraft(chatId, value);
   }
 
   /** Signal that I'm typing in this chat — throttled, and only for non-empty text. */
@@ -371,6 +470,7 @@ export default function Composer({
     if (!mention) return;
     const { text: newText, caret } = insertMention(text, mention.end, mention.start, member);
     setText(newText);
+    persistDraft(newText);
     setMention(null);
     if (!picked.current.some((p) => p.id === member.id)) {
       picked.current = [...picked.current, { id: member.id, displayName: member.displayName }];
@@ -384,7 +484,7 @@ export default function Composer({
     });
   }
 
-  function handleKeyDown(e: KeyboardEvent<HTMLInputElement>) {
+  function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
     // Escape priority when the mention dropdown is closed: cancel reply first,
     // then edit. (The dropdown, when open, is closed by the switch below.)
     if (e.key === 'Escape' && !mention) {
@@ -399,7 +499,15 @@ export default function Composer({
         return;
       }
     }
-    if (!mention) return; // dropdown closed → let the form handle Enter, etc.
+    // Send shortcuts: plain Enter inserts a newline (textarea default); Shift+Enter,
+    // Ctrl+Enter, or Cmd+Enter send. Only while the dropdown is closed — otherwise
+    // Enter selects the highlighted mention candidate (handled in the switch below).
+    if (e.key === 'Enter' && (e.shiftKey || e.ctrlKey || e.metaKey) && !mention) {
+      e.preventDefault();
+      void submit();
+      return;
+    }
+    if (!mention) return; // dropdown closed → let the textarea handle Enter, etc.
     const { candidates, highlight } = mention;
     switch (e.key) {
       case 'ArrowDown':
@@ -427,15 +535,24 @@ export default function Composer({
     }
   }
 
-  /** Put failed-send state back, but never clobber anything typed/picked since. */
+  /** Put failed-send state back, but never clobber anything typed/picked since.
+   *  The restored text becomes the draft again (a failed send was never sent). */
   function restoreAfterFailure(prevText: string, prevPicked: MentionCandidate[], prevPending: PendingAttachment[]) {
-    setText((cur) => (cur.length > 0 ? cur : prevText));
+    const restored = textRef.current.length > 0 ? textRef.current : prevText;
+    setText(restored);
+    persistDraft(restored);
     if (picked.current.length === 0) picked.current = prevPicked;
     setPending((cur) => (cur.length > 0 ? cur : prevPending));
   }
 
-  async function handleSubmit(e: FormEvent<HTMLFormElement>) {
+  function handleSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
+    void submit();
+  }
+
+  /** Send the message (or save the edit). Shared by the form's submit button and
+   *  the Shift/Ctrl+Enter keyboard shortcuts. */
+  async function submit() {
     if (!canSend) return;
     const content = trimmed;
     setSendError(null);
@@ -472,6 +589,7 @@ export default function Composer({
     setMention(null);
     picked.current = [];
     setPending([]);
+    clearDraft(chatId); // the draft is now on its way; a failure re-persists it
 
     try {
       await onSend(content, mentions, attachmentIds, replyingTo?.id);
@@ -488,16 +606,19 @@ export default function Composer({
   return (
     <form
       onSubmit={handleSubmit}
-      className="relative flex flex-col gap-2 border-t border-gray-200 bg-white p-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))]"
+      onPaste={handlePaste}
+      onDrop={handleDrop}
+      onDragOver={handleDragOver}
+      className="relative flex flex-col gap-2 border-t border-gray-200 bg-white p-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))] dark:border-gray-700 dark:bg-gray-800"
     >
       {isEditing && (
-        <div className="flex items-center justify-between rounded-lg bg-gray-100 px-3 py-1.5 text-sm text-gray-600">
+        <div className="flex items-center justify-between rounded-lg bg-gray-100 px-3 py-1.5 text-sm text-gray-600 dark:bg-gray-700 dark:text-gray-300">
           <span className="font-medium">Editing message</span>
           <button
             type="button"
             aria-label="Cancel edit"
             onClick={() => onCancelEdit?.()}
-            className="flex h-6 w-6 items-center justify-center rounded-full text-gray-500 transition-colors hover:bg-gray-200"
+            className="flex h-6 w-6 items-center justify-center rounded-full text-gray-500 transition-colors hover:bg-gray-200 dark:text-gray-400 dark:hover:bg-gray-600"
           >
             <CloseIcon />
           </button>
@@ -505,18 +626,18 @@ export default function Composer({
       )}
 
       {isReplying && replyingTo && (
-        <div className="flex items-center justify-between gap-2 rounded-lg bg-gray-100 px-3 py-1.5 text-sm">
+        <div className="flex items-center justify-between gap-2 rounded-lg bg-gray-100 px-3 py-1.5 text-sm dark:bg-gray-700">
           <span className="flex min-w-0 flex-col">
-            <span className="font-medium text-gray-700">
+            <span className="font-medium text-gray-700 dark:text-gray-200">
               Replying to {replyingTo.sender.displayName}
             </span>
-            <span className="truncate text-gray-500">{replyPreview(replyingTo)}</span>
+            <span className="truncate text-gray-500 dark:text-gray-400">{replyPreview(replyingTo)}</span>
           </span>
           <button
             type="button"
             aria-label="Cancel reply"
             onClick={() => onCancelReply?.()}
-            className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full text-gray-500 transition-colors hover:bg-gray-200"
+            className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full text-gray-500 transition-colors hover:bg-gray-200 dark:text-gray-400 dark:hover:bg-gray-600"
           >
             <CloseIcon />
           </button>
@@ -526,14 +647,14 @@ export default function Composer({
       {sendError && (
         <div
           role="alert"
-          className="flex items-center justify-between rounded-lg bg-red-50 px-3 py-1.5 text-sm text-red-700"
+          className="flex items-center justify-between rounded-lg bg-red-50 px-3 py-1.5 text-sm text-red-700 dark:bg-red-500/10 dark:text-red-300"
         >
           <span className="min-w-0 truncate">{sendError}</span>
           <button
             type="button"
             aria-label="Dismiss error"
             onClick={() => setSendError(null)}
-            className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full text-red-500 transition-colors hover:bg-red-100"
+            className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full text-red-500 transition-colors hover:bg-red-100 dark:text-red-400 dark:hover:bg-red-500/20"
           >
             <CloseIcon />
           </button>
@@ -544,7 +665,7 @@ export default function Composer({
         <ul
           role="listbox"
           aria-label="Mention suggestions"
-          className="absolute bottom-full left-2 right-2 mb-2 max-h-60 overflow-y-auto rounded-xl border border-gray-200 bg-white py-1 shadow-lg"
+          className="absolute bottom-full left-2 right-2 mb-2 max-h-60 overflow-y-auto rounded-xl border border-gray-200 bg-white py-1 shadow-lg dark:border-gray-700 dark:bg-gray-800"
         >
           {mention.candidates.map((m, i) => (
             <li key={m.id} role="option" aria-selected={i === mention.highlight}>
@@ -554,11 +675,11 @@ export default function Composer({
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={() => selectMention(m)}
                 className={`flex w-full items-center gap-2 px-3 py-2 text-left transition-colors ${
-                  i === mention.highlight ? 'bg-gray-100' : 'hover:bg-gray-50'
+                  i === mention.highlight ? 'bg-gray-100 dark:bg-gray-700' : 'hover:bg-gray-50 dark:hover:bg-gray-700'
                 }`}
               >
                 <Avatar name={m.displayName} id={m.id} size="sm" />
-                <span className="min-w-0 truncate text-gray-900">{m.displayName}</span>
+                <span className="min-w-0 truncate text-gray-900 dark:text-gray-100">{m.displayName}</span>
               </button>
             </li>
           ))}
@@ -578,7 +699,7 @@ export default function Composer({
         </div>
       )}
 
-      <div className="flex items-center gap-2">
+      <div className="flex items-end gap-2">
         {/* Attachments aren't editable, so the upload controls are hidden in edit mode. */}
         {!isEditing && (
           <>
@@ -595,7 +716,7 @@ export default function Composer({
               onClick={() => fileInputRef.current?.click()}
               disabled={disabled}
               aria-label="Attach files"
-              className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full text-gray-500 transition-colors hover:bg-gray-100 disabled:opacity-40"
+              className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full text-gray-500 transition-colors hover:bg-gray-100 disabled:opacity-40 dark:text-gray-400 dark:hover:bg-gray-700"
             >
               <PaperclipIcon />
             </button>
@@ -605,7 +726,7 @@ export default function Composer({
               aria-pressed={hd}
               title="Upload original quality"
               className={`flex h-8 flex-shrink-0 items-center justify-center rounded-full px-2 text-xs font-bold transition-colors ${
-                hd ? 'bg-[#0084ff] text-white' : 'bg-gray-100 text-gray-500'
+                hd ? 'bg-[#0084ff] text-white' : 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-400'
               }`}
             >
               HD
@@ -616,17 +737,19 @@ export default function Composer({
         <label htmlFor="composer-input" className="sr-only">
           Message
         </label>
-        <input
+        <textarea
           id="composer-input"
           ref={inputRef}
-          type="text"
+          rows={1}
           autoComplete="off"
           placeholder="Aa"
           value={text}
           onChange={(e) => {
-            setText(e.target.value);
-            refreshMention(e.target.value, e.target.selectionStart ?? e.target.value.length);
-            emitTyping(e.target.value);
+            const value = e.target.value;
+            setText(value);
+            persistDraft(value);
+            refreshMention(value, e.target.selectionStart ?? value.length);
+            emitTyping(value);
           }}
           onKeyDown={handleKeyDown}
           onSelect={(e) => {
@@ -634,7 +757,8 @@ export default function Composer({
             refreshMention(el.value, el.selectionStart ?? el.value.length);
           }}
           disabled={disabled}
-          className="min-w-0 flex-1 rounded-full bg-gray-100 px-4 py-2.5 text-gray-900 focus:outline-none disabled:opacity-60"
+          style={{ maxHeight: MAX_TEXTAREA_HEIGHT }}
+          className="min-w-0 flex-1 resize-none overflow-y-auto rounded-2xl bg-gray-100 px-4 py-2.5 text-gray-900 focus:outline-none disabled:opacity-60 dark:bg-gray-700 dark:text-gray-100 dark:placeholder:text-gray-400"
         />
         <button
           type="submit"

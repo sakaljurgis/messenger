@@ -41,7 +41,7 @@ export default function Avatar({ name, id, size = 'md', className = '', online =
       {online && (
         <span
           data-testid="presence-dot"
-          className={`absolute bottom-0 right-0 rounded-full bg-green-500 ring-2 ring-white ${dotSizeClasses[size]}`}
+          className={`absolute bottom-0 right-0 rounded-full bg-green-500 ring-2 ring-white dark:ring-gray-900 ${dotSizeClasses[size]}`}
         />
       )}
     </div>

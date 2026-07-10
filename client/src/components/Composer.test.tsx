@@ -52,6 +52,13 @@ function fakeFile(name: string, type: string, size: number): File {
   return file;
 }
 
+// The composer persists unsent text to localStorage (per-chat drafts). Start
+// every test from an empty store so a draft written by one case can't prefill
+// the input in the next and skew unrelated assertions.
+beforeEach(() => {
+  localStorage.clear();
+});
+
 describe('Composer @mentions', () => {
   it('autocompletes a mention on Enter without submitting, then sends the picked id', async () => {
     const onSend = vi.fn();
@@ -364,5 +371,218 @@ describe('Composer attachments', () => {
     await userEvent.click(retry);
     await waitFor(() => expect(screen.getByRole('button', { name: /send/i })).not.toBeDisabled());
     expect(uploadAttachment).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('Composer multiline textarea', () => {
+  it('inserts a newline on Enter without submitting', async () => {
+    const onSend = vi.fn();
+    render(<Composer onSend={onSend} members={[me]} meId={me.id} chatId={10} />);
+
+    const input = screen.getByPlaceholderText('Aa');
+    await userEvent.type(input, 'line one{Enter}line two');
+
+    // Enter is a plain newline in the textarea — it must NOT send.
+    expect(onSend).not.toHaveBeenCalled();
+    expect(input).toHaveValue('line one\nline two');
+  });
+
+  it('sends on Shift+Enter', async () => {
+    const onSend = vi.fn();
+    render(<Composer onSend={onSend} members={[me]} meId={me.id} chatId={10} />);
+
+    const input = screen.getByPlaceholderText('Aa');
+    await userEvent.type(input, 'hello');
+    await userEvent.keyboard('{Shift>}{Enter}{/Shift}');
+
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(onSend).toHaveBeenCalledWith('hello', [], [], undefined);
+  });
+
+  it('sends on Ctrl+Enter', async () => {
+    const onSend = vi.fn();
+    render(<Composer onSend={onSend} members={[me]} meId={me.id} chatId={10} />);
+
+    const input = screen.getByPlaceholderText('Aa');
+    await userEvent.type(input, 'hello');
+    await userEvent.keyboard('{Control>}{Enter}{/Control}');
+
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(onSend).toHaveBeenCalledWith('hello', [], [], undefined);
+  });
+
+  it('still sends via the on-screen send button (the primary mobile affordance)', async () => {
+    const onSend = vi.fn();
+    render(<Composer onSend={onSend} members={[me]} meId={me.id} chatId={10} />);
+
+    await userEvent.type(screen.getByPlaceholderText('Aa'), 'tap send');
+    await userEvent.click(screen.getByRole('button', { name: /send/i }));
+
+    expect(onSend).toHaveBeenCalledWith('tap send', [], [], undefined);
+  });
+
+  it('does not send an Enter while the mention dropdown is open (selects instead)', async () => {
+    const onSend = vi.fn();
+    render(<Composer onSend={onSend} members={[me, alice]} meId={me.id} chatId={10} />);
+
+    const input = screen.getByPlaceholderText('Aa');
+    await userEvent.type(input, '@al');
+    await userEvent.keyboard('{Shift>}{Enter}{/Shift}');
+
+    // Dropdown was open → Shift+Enter selects the candidate rather than sending.
+    expect(onSend).not.toHaveBeenCalled();
+    expect(input).toHaveValue('@Alice ');
+  });
+});
+
+describe('Composer drafts', () => {
+  /** Build a message for edit-mode prefill scenarios. */
+  function message(over: Partial<MessageDTO> = {}): MessageDTO {
+    return {
+      id: 99,
+      chatId: 10,
+      sender: me,
+      content: 'original text',
+      mentions: [],
+      attachments: [],
+      reactions: [],
+      replyTo: null,
+      createdAt: new Date(1_700_000_000_000).toISOString(),
+      editedAt: null,
+      isDeleted: false,
+      ...over,
+    };
+  }
+
+  it('persists typed text to localStorage keyed by chat id', async () => {
+    render(<Composer onSend={vi.fn()} members={[me]} meId={me.id} chatId={10} />);
+    await userEvent.type(screen.getByPlaceholderText('Aa'), 'unsent draft');
+    expect(localStorage.getItem('draft:chat:10')).toBe('unsent draft');
+  });
+
+  it('restores the saved draft when it mounts', () => {
+    localStorage.setItem('draft:chat:10', 'welcome back');
+    render(<Composer onSend={vi.fn()} members={[me]} meId={me.id} chatId={10} />);
+    expect(screen.getByPlaceholderText('Aa')).toHaveValue('welcome back');
+  });
+
+  it('swaps to the other chat draft when chatId changes (no remount)', () => {
+    localStorage.setItem('draft:chat:10', 'for chat ten');
+    localStorage.setItem('draft:chat:20', 'for chat twenty');
+    const props = { onSend: vi.fn(), members: [me], meId: me.id };
+    const { rerender } = render(<Composer {...props} chatId={10} />);
+    expect(screen.getByPlaceholderText('Aa')).toHaveValue('for chat ten');
+
+    rerender(<Composer {...props} chatId={20} />);
+    expect(screen.getByPlaceholderText('Aa')).toHaveValue('for chat twenty');
+  });
+
+  it('removes the draft key once the text is emptied', async () => {
+    render(<Composer onSend={vi.fn()} members={[me]} meId={me.id} chatId={10} />);
+    const input = screen.getByPlaceholderText('Aa');
+    await userEvent.type(input, 'x');
+    expect(localStorage.getItem('draft:chat:10')).toBe('x');
+
+    await userEvent.clear(input);
+    expect(localStorage.getItem('draft:chat:10')).toBeNull();
+  });
+
+  it('clears the draft after a successful send', async () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    render(<Composer onSend={onSend} members={[me]} meId={me.id} chatId={10} />);
+
+    await userEvent.type(screen.getByPlaceholderText('Aa'), 'goodbye');
+    expect(localStorage.getItem('draft:chat:10')).toBe('goodbye');
+
+    await userEvent.click(screen.getByRole('button', { name: /send/i }));
+    await waitFor(() => expect(onSend).toHaveBeenCalled());
+    expect(localStorage.getItem('draft:chat:10')).toBeNull();
+    expect(screen.getByPlaceholderText('Aa')).toHaveValue('');
+  });
+
+  it('re-persists the draft when a send fails', async () => {
+    const onSend = vi.fn().mockRejectedValueOnce(new Error('boom'));
+    render(<Composer onSend={onSend} members={[me]} meId={me.id} chatId={10} />);
+
+    await userEvent.type(screen.getByPlaceholderText('Aa'), 'keep me');
+    await userEvent.click(screen.getByRole('button', { name: /send/i }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('boom');
+    expect(screen.getByPlaceholderText('Aa')).toHaveValue('keep me');
+    expect(localStorage.getItem('draft:chat:10')).toBe('keep me');
+  });
+
+  it('does not overwrite the draft when entering edit mode, and restores it on cancel', () => {
+    localStorage.setItem('draft:chat:10', 'my draft');
+    const props = { onSend: vi.fn(), members: [me], meId: me.id, chatId: 10 };
+    const { rerender } = render(<Composer {...props} />);
+    expect(screen.getByPlaceholderText('Aa')).toHaveValue('my draft');
+
+    // Entering edit mode prefills the message text but must leave the draft intact.
+    rerender(
+      <Composer {...props} editing={message()} onEditSubmit={vi.fn()} onCancelEdit={vi.fn()} />,
+    );
+    expect(screen.getByPlaceholderText('Aa')).toHaveValue('original text');
+    expect(localStorage.getItem('draft:chat:10')).toBe('my draft');
+
+    // Cancelling the edit brings the draft back into the input.
+    rerender(<Composer {...props} editing={null} />);
+    expect(screen.getByPlaceholderText('Aa')).toHaveValue('my draft');
+    expect(localStorage.getItem('draft:chat:10')).toBe('my draft');
+  });
+});
+
+describe('Composer paste and drop', () => {
+  beforeEach(() => {
+    (uploadAttachment as Mock).mockResolvedValue(dto);
+    (compressImage as Mock).mockImplementation(async (f: File) => f);
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('uploads an image pasted into the composer', async () => {
+    const onSend = vi.fn();
+    render(<Composer onSend={onSend} members={[me]} meId={me.id} chatId={10} />);
+
+    // A small PNG (under the compress threshold) uploads as-is.
+    const file = fakeFile('screenshot.png', 'image/png', 500 * 1024);
+    fireEvent.paste(screen.getByPlaceholderText('Aa'), {
+      clipboardData: { files: [file], items: [], getData: () => '' },
+    });
+
+    await waitFor(() =>
+      expect(uploadAttachment).toHaveBeenCalledWith(10, file, expect.any(Function)),
+    );
+    await waitFor(() => expect(screen.getByRole('button', { name: /send/i })).not.toBeDisabled());
+  });
+
+  it('ignores a plain-text paste (no files)', () => {
+    render(<Composer onSend={vi.fn()} members={[me]} meId={me.id} chatId={10} />);
+    fireEvent.paste(screen.getByPlaceholderText('Aa'), {
+      clipboardData: { files: [], items: [], getData: () => 'just text' },
+    });
+    expect(uploadAttachment).not.toHaveBeenCalled();
+  });
+
+  it('uploads a non-image file dropped onto the composer, same as picking it', async () => {
+    const onSend = vi.fn();
+    const { container } = render(
+      <Composer onSend={onSend} members={[me]} meId={me.id} chatId={10} />,
+    );
+    const form = container.querySelector('form')!;
+
+    const file = new File(['pdf'], 'dropped.pdf', { type: 'application/pdf' });
+    const dataTransfer = { files: [file], items: [], types: ['Files'] };
+    fireEvent.dragOver(form, { dataTransfer });
+    fireEvent.drop(form, { dataTransfer });
+
+    await waitFor(() =>
+      expect(uploadAttachment).toHaveBeenCalledWith(10, file, expect.any(Function)),
+    );
+    // Non-image → uploaded without compression, just like the file picker.
+    expect(compressImage).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByRole('button', { name: /send/i })).not.toBeDisabled());
   });
 });

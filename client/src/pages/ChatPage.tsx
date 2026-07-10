@@ -65,7 +65,7 @@ const LONG_PRESS_MS = 500;
 /** A deleted message: a muted, italic outline bubble with no fill and no menu. */
 function TombstoneBubble() {
   return (
-    <div className="rounded-2xl border border-gray-200 px-3 py-2 text-sm italic text-gray-400">
+    <div className="rounded-2xl border border-gray-200 px-3 py-2 text-sm italic text-gray-400 dark:border-gray-700 dark:text-gray-500">
       Message deleted
     </div>
   );
@@ -75,9 +75,11 @@ function TombstoneBubble() {
  * Wraps a non-deleted bubble with a message-actions affordance: a '⋯' button
  * that fades in on hover (desktop) and a long-press / right-click on the bubble
  * itself (mobile) — both open a small popover. The popover always leads with the
- * emoji reaction picker (every member may react); `onReply` (every non-deleted
- * message) and `onEdit`/`onDelete` (own messages only), when provided, add
- * Reply/Edit/Delete rows below it. Closes on an outside tap/click or Escape.
+ * emoji reaction picker (every member may react); `onCopy` (any message with
+ * text — mobile's replacement for the OS long-press copy UI we suppress below),
+ * `onReply` (every non-deleted message), and `onEdit`/`onDelete` (own messages
+ * only), when provided, add Copy/Reply/Edit/Delete rows below it. Closes on an
+ * outside tap/click or Escape.
  *
  * `isMine` picks the side everything hangs off: the '⋯' button sits toward the
  * screen center (after the bubble for received messages, before it for mine) so
@@ -88,6 +90,7 @@ function TombstoneBubble() {
 function MessageActions({
   isMine,
   onReact,
+  onCopy,
   onReply,
   onEdit,
   onDelete,
@@ -95,6 +98,7 @@ function MessageActions({
 }: {
   isMine: boolean;
   onReact: (emoji: string) => void;
+  onCopy?: () => void;
   onReply?: () => void;
   onEdit?: () => void;
   onDelete?: () => void;
@@ -136,7 +140,7 @@ function MessageActions({
       aria-haspopup="menu"
       aria-expanded={open}
       onClick={() => setOpen((v) => !v)}
-      className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full text-gray-400 opacity-0 transition-opacity hover:bg-gray-100 focus:opacity-100 group-hover:opacity-100"
+      className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full text-gray-400 opacity-0 transition-opacity hover:bg-gray-100 focus:opacity-100 group-hover:opacity-100 dark:text-gray-500 dark:hover:bg-gray-700"
     >
       <DotsIcon />
     </button>
@@ -167,7 +171,7 @@ function MessageActions({
       {open && (
         <div
           role="menu"
-          className={`absolute top-full z-10 mt-1 min-w-[8rem] overflow-hidden rounded-xl border border-gray-200 bg-white py-1 shadow-lg ${
+          className={`absolute top-full z-10 mt-1 min-w-[8rem] overflow-hidden rounded-xl border border-gray-200 bg-white py-1 shadow-lg dark:border-gray-700 dark:bg-gray-800 ${
             isMine ? 'right-0' : 'left-0'
           }`}
         >
@@ -182,12 +186,25 @@ function MessageActions({
                   setOpen(false);
                   onReact(emoji);
                 }}
-                className="flex h-8 w-8 items-center justify-center rounded-full text-lg transition-colors hover:bg-gray-100"
+                className="flex h-8 w-8 items-center justify-center rounded-full text-lg transition-colors hover:bg-gray-100 dark:hover:bg-gray-700"
               >
                 {emoji}
               </button>
             ))}
           </div>
+          {onCopy && (
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setOpen(false);
+                onCopy();
+              }}
+              className="block w-full px-4 py-2 text-left text-sm text-gray-700 transition-colors hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-700"
+            >
+              Copy
+            </button>
+          )}
           {onReply && (
             <button
               type="button"
@@ -196,7 +213,7 @@ function MessageActions({
                 setOpen(false);
                 onReply();
               }}
-              className="block w-full px-4 py-2 text-left text-sm text-gray-700 transition-colors hover:bg-gray-100"
+              className="block w-full px-4 py-2 text-left text-sm text-gray-700 transition-colors hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-700"
             >
               Reply
             </button>
@@ -209,7 +226,7 @@ function MessageActions({
                 setOpen(false);
                 onEdit();
               }}
-              className="block w-full px-4 py-2 text-left text-sm text-gray-700 transition-colors hover:bg-gray-100"
+              className="block w-full px-4 py-2 text-left text-sm text-gray-700 transition-colors hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-700"
             >
               Edit
             </button>
@@ -222,7 +239,7 @@ function MessageActions({
                 setOpen(false);
                 onDelete();
               }}
-              className="block w-full px-4 py-2 text-left text-sm text-red-600 transition-colors hover:bg-gray-100"
+              className="block w-full px-4 py-2 text-left text-sm text-red-600 transition-colors hover:bg-gray-100 dark:text-red-400 dark:hover:bg-gray-700"
             >
               Delete
             </button>
@@ -262,7 +279,7 @@ function ReactionChips({
             className={`flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs transition-colors ${
               mine
                 ? 'border-[#0084ff] bg-[#0084ff]/10 text-[#0084ff]'
-                : 'border-gray-200 bg-gray-100 text-gray-600 hover:bg-gray-200'
+                : 'border-gray-200 bg-gray-100 text-gray-600 hover:bg-gray-200 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600'
             }`}
           >
             <span aria-hidden="true">{r.emoji}</span>
@@ -396,8 +413,8 @@ function AttachmentImages({
 
 /** Non-image attachment: a download card styled like the message bubble. */
 function AttachmentFile({ file, isMine }: { file: AttachmentDTO; isMine: boolean }) {
-  const bubble = isMine ? 'bg-[#0084ff] text-white' : 'bg-gray-200 text-gray-900';
-  const sub = isMine ? 'text-white/70' : 'text-gray-500';
+  const bubble = isMine ? 'bg-[#0084ff] text-white' : 'bg-gray-200 text-gray-900 dark:bg-gray-700 dark:text-gray-100';
+  const sub = isMine ? 'text-white/70' : 'text-gray-500 dark:text-gray-400';
   return (
     <a
       href={attachmentUrl(file.id, { download: true })}
@@ -443,12 +460,12 @@ function ReplyQuote({
       type="button"
       onClick={onJump}
       aria-label={`Replying to ${name}`}
-      className={`flex max-w-full flex-col overflow-hidden rounded-lg border-l-2 border-[#0084ff] bg-gray-100 px-2 py-1 text-left ${
+      className={`flex max-w-full flex-col overflow-hidden rounded-lg border-l-2 border-[#0084ff] bg-gray-100 px-2 py-1 text-left dark:bg-gray-700 ${
         isMine ? 'items-end self-end' : 'items-start self-start'
       }`}
     >
       <span className="max-w-full truncate text-xs font-semibold text-[#0084ff]">{name}</span>
-      <span className="max-w-full truncate text-xs text-gray-600">{body}</span>
+      <span className="max-w-full truncate text-xs text-gray-600 dark:text-gray-300">{body}</span>
     </button>
   );
 }
@@ -474,7 +491,7 @@ function MessageStack({
   const images = message.attachments.filter((a) => a.kind === 'image');
   const files = message.attachments.filter((a) => a.kind === 'file');
   const hasText = message.content.length > 0;
-  const bubble = isMine ? 'bg-[#0084ff] text-white' : 'bg-gray-200 text-gray-900';
+  const bubble = isMine ? 'bg-[#0084ff] text-white' : 'bg-gray-200 text-gray-900 dark:bg-gray-700 dark:text-gray-100';
 
   return (
     <div className={`flex w-full flex-col gap-1 ${isMine ? 'items-end' : 'items-start'}`}>
@@ -502,7 +519,7 @@ function MessageStack({
 /** The `14:32 (edited)` line under the last bubble of a run. */
 function TimeLabel({ message, indent }: { message: MessageDTO; indent: boolean }) {
   return (
-    <span className={`mt-0.5 text-[10px] text-gray-400 ${indent ? 'ml-1' : ''}`}>
+    <span className={`mt-0.5 text-[10px] text-gray-400 dark:text-gray-500 ${indent ? 'ml-1' : ''}`}>
       {formatMessageTime(message.createdAt)}
       {message.editedAt && <span className="ml-1">(edited)</span>}
     </span>
@@ -561,6 +578,7 @@ function MessageRow({
   onEdit,
   onDelete,
   onReact,
+  onCopy,
   onReply,
   onJumpToMessage,
 }: {
@@ -572,6 +590,7 @@ function MessageRow({
   onEdit: (message: MessageDTO) => void;
   onDelete: (message: MessageDTO) => void;
   onReact: (message: MessageDTO, emoji: string) => void;
+  onCopy: (message: MessageDTO) => void;
   onReply: (message: MessageDTO) => void;
   onJumpToMessage: (messageId: number) => void;
 }) {
@@ -579,6 +598,9 @@ function MessageRow({
   const spacing = isRunStart ? 'mt-3' : 'mt-0.5';
   // Tapping the sender avatar reveals the name on this row (mobile has no hover).
   const [nameRevealed, setNameRevealed] = useState(false);
+  // Copy is only meaningful when there's text to copy — not for attachment-only
+  // or (already excluded above) deleted messages.
+  const copyHandler = message.content.length > 0 ? () => onCopy(message) : undefined;
 
   if (isMine) {
     return (
@@ -590,6 +612,7 @@ function MessageRow({
             <MessageActions
               isMine
               onReact={(emoji) => onReact(message, emoji)}
+              onCopy={copyHandler}
               onReply={() => onReply(message)}
               onEdit={() => onEdit(message)}
               onDelete={() => onDelete(message)}
@@ -637,7 +660,7 @@ function MessageRow({
         )}
         <div className="flex min-w-0 flex-col items-start">
           {(showSender || nameRevealed) && (
-            <span className="mb-0.5 ml-1 text-xs text-gray-500">{message.sender.displayName}</span>
+            <span className="mb-0.5 ml-1 text-xs text-gray-500 dark:text-gray-400">{message.sender.displayName}</span>
           )}
           {message.isDeleted ? (
             <TombstoneBubble />
@@ -645,6 +668,7 @@ function MessageRow({
             <MessageActions
               isMine={false}
               onReact={(emoji) => onReact(message, emoji)}
+              onCopy={copyHandler}
               onReply={() => onReply(message)}
             >
               <MessageStack
@@ -690,16 +714,16 @@ function TypingIndicator({ names, isGroup }: { names: string[]; isGroup: boolean
       <div className="flex items-end gap-2">
         {isGroup && <div className="w-8 flex-shrink-0" />}
         <div className="flex flex-col items-start gap-0.5">
-          <div className="flex items-center gap-1 rounded-2xl bg-gray-200 px-3.5 py-3">
+          <div className="flex items-center gap-1 rounded-2xl bg-gray-200 px-3.5 py-3 dark:bg-gray-700">
             {[0, 1, 2].map((i) => (
               <span
                 key={i}
-                className="h-2 w-2 animate-bounce rounded-full bg-gray-400"
+                className="h-2 w-2 animate-bounce rounded-full bg-gray-400 dark:bg-gray-500"
                 style={{ animationDelay: `${i * 0.15}s` }}
               />
             ))}
           </div>
-          <span className="ml-1 text-[10px] text-gray-400">{typingLabel(names)}</span>
+          <span className="ml-1 text-[10px] text-gray-400 dark:text-gray-500">{typingLabel(names)}</span>
         </div>
       </div>
     </div>
@@ -923,18 +947,23 @@ export default function ChatPage() {
     });
   }
 
+  function handleCopy(message: MessageDTO) {
+    // Fire-and-forget: a denied clipboard permission shouldn't throw into the UI.
+    void navigator.clipboard.writeText(message.content).catch(() => {});
+  }
+
   async function handleEditSubmit(messageId: number, content: string, mentions: number[]) {
     await editMessage(messageId, content, mentions);
     setEditing(null);
   }
 
   return (
-    <div className="mx-auto flex h-full w-full max-w-xl flex-col bg-white">
-      <header className="flex flex-shrink-0 items-center gap-2 border-b border-gray-200 px-2 py-2">
+    <div className="mx-auto flex h-full w-full max-w-xl flex-col bg-white dark:bg-gray-900">
+      <header className="flex flex-shrink-0 items-center gap-2 border-b border-gray-200 px-2 py-2 dark:border-gray-700">
         <Link
           to="/chats"
           aria-label="Back"
-          className="flex h-9 w-9 items-center justify-center rounded-full text-gray-600 transition-colors hover:bg-gray-100"
+          className="flex h-9 w-9 items-center justify-center rounded-full text-gray-600 transition-colors hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-800"
         >
           <BackIcon />
         </Link>
@@ -950,14 +979,14 @@ export default function ChatPage() {
             type="button"
             onClick={() => setShowInfo(true)}
             aria-label="Group info"
-            className="min-w-0 flex-1 rounded-lg px-1 text-left transition-colors hover:bg-gray-50"
+            className="min-w-0 flex-1 rounded-lg px-1 text-left transition-colors hover:bg-gray-50 dark:hover:bg-gray-800"
           >
-            <h1 className="truncate font-semibold text-gray-900">{title}</h1>
-            {chat && <p className="truncate text-xs text-gray-500">{chat.members.length} members</p>}
+            <h1 className="truncate font-semibold text-gray-900 dark:text-gray-100">{title}</h1>
+            {chat && <p className="truncate text-xs text-gray-500 dark:text-gray-400">{chat.members.length} members</p>}
           </button>
         ) : (
           <div className="min-w-0">
-            <h1 className="truncate font-semibold text-gray-900">{title}</h1>
+            <h1 className="truncate font-semibold text-gray-900 dark:text-gray-100">{title}</h1>
           </div>
         )}
       </header>
@@ -974,7 +1003,7 @@ export default function ChatPage() {
               <button
                 type="button"
                 onClick={handleLoadOlder}
-                className="rounded-full bg-gray-100 px-4 py-1 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-200"
+                className="rounded-full bg-gray-100 px-4 py-1 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700"
               >
                 Load older
               </button>
@@ -983,10 +1012,10 @@ export default function ChatPage() {
 
           {loading && messages.length === 0 ? (
             <div className="flex justify-center py-10" role="status" aria-label="Loading messages">
-              <div className="h-8 w-8 animate-spin rounded-full border-4 border-gray-200 border-t-[#0084ff]" />
+              <div className="h-8 w-8 animate-spin rounded-full border-4 border-gray-200 border-t-[#0084ff] dark:border-gray-700 dark:border-t-[#0084ff]" />
             </div>
           ) : messages.length === 0 ? (
-            <p className="py-10 text-center text-sm text-gray-400">No messages yet. Say hi!</p>
+            <p className="py-10 text-center text-sm text-gray-400 dark:text-gray-500">No messages yet. Say hi!</p>
           ) : (
             rows.map((row) => (
               <div
@@ -998,7 +1027,7 @@ export default function ChatPage() {
               >
                 {row.separatorLabel && (
                   <div className="flex justify-center py-3">
-                    <span className="rounded-full bg-gray-100 px-3 py-1 text-xs font-medium text-gray-500">
+                    <span className="rounded-full bg-gray-100 px-3 py-1 text-xs font-medium text-gray-500 dark:bg-gray-800 dark:text-gray-400">
                       {row.separatorLabel}
                     </span>
                   </div>
@@ -1013,6 +1042,7 @@ export default function ChatPage() {
                   onEdit={startEdit}
                   onDelete={handleDelete}
                   onReact={handleReact}
+                  onCopy={handleCopy}
                   onReply={startReply}
                   onJumpToMessage={jumpToMessage}
                 />
@@ -1029,7 +1059,7 @@ export default function ChatPage() {
             type="button"
             onClick={handleJumpToBottom}
             aria-label="Jump to latest messages"
-            className="absolute bottom-3 right-3 flex items-center gap-1.5 rounded-full bg-white px-3 py-2 text-sm font-medium text-gray-700 shadow-lg ring-1 ring-gray-200 transition-colors hover:bg-gray-50"
+            className="absolute bottom-3 right-3 flex items-center gap-1.5 rounded-full bg-white px-3 py-2 text-sm font-medium text-gray-700 shadow-lg ring-1 ring-gray-200 transition-colors hover:bg-gray-50 dark:bg-gray-800 dark:text-gray-200 dark:ring-gray-700 dark:hover:bg-gray-700"
           >
             <DownArrowIcon />
             {newMessageCount > 0 && <span>{newMessageCount} new</span>}

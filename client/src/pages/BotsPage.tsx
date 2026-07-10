@@ -42,22 +42,22 @@ export default function BotsPage() {
       <Link to="/settings" className="mb-3 inline-block text-sm font-medium text-[#0084ff]">
         ‹ Settings
       </Link>
-      <h1 className="mb-4 text-xl font-bold text-gray-900">Bots</h1>
+      <h1 className="mb-4 text-xl font-bold text-gray-900 dark:text-gray-100">Bots</h1>
 
-      {error && <p className="mb-3 text-sm text-red-600">{error}</p>}
+      {error && <p className="mb-3 text-sm text-red-600 dark:text-red-400">{error}</p>}
 
       <CreateBotSection onCreated={reload} />
 
       <section>
-        <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">
+        <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
           Your bots
         </h2>
         {bots === null ? (
           <div className="flex justify-center py-10" role="status" aria-label="Loading bots">
-            <div className="h-8 w-8 animate-spin rounded-full border-4 border-gray-200 border-t-[#0084ff]" />
+            <div className="h-8 w-8 animate-spin rounded-full border-4 border-gray-200 border-t-[#0084ff] dark:border-gray-700 dark:border-t-[#0084ff]" />
           </div>
         ) : bots.length === 0 ? (
-          <p className="py-8 text-center text-gray-500">No bots yet</p>
+          <p className="py-8 text-center text-gray-500 dark:text-gray-400">No bots yet</p>
         ) : (
           <ul className="flex flex-col gap-3">
             {bots.map((bot) => (
@@ -114,19 +114,19 @@ function BotRow({ bot, onSaved }: { bot: BotDTO; onSaved: () => void }) {
   }
 
   return (
-    <li className="rounded-xl bg-gray-50 p-3">
+    <li className="rounded-xl bg-gray-50 p-3 dark:bg-gray-800">
       <div className="mb-2 flex items-center gap-3">
         <Avatar name={bot.displayName} id={bot.id} size="sm" />
         <div className="min-w-0">
-          <p className="truncate font-medium text-gray-900">{bot.displayName}</p>
-          <p className="truncate text-xs text-gray-500">{bot.webhookUrl ?? 'No webhook'}</p>
+          <p className="truncate font-medium text-gray-900 dark:text-gray-100">{bot.displayName}</p>
+          <p className="truncate text-xs text-gray-500 dark:text-gray-400">{bot.webhookUrl ?? 'No webhook'}</p>
         </div>
         <button
           type="button"
           onClick={remove}
           disabled={busy}
           aria-label={`Delete ${bot.displayName}`}
-          className="ml-auto flex-shrink-0 rounded-full px-3 py-1.5 text-sm font-semibold text-red-600 transition-colors hover:bg-red-50 disabled:opacity-50"
+          className="ml-auto flex-shrink-0 rounded-full px-3 py-1.5 text-sm font-semibold text-red-600 transition-colors hover:bg-red-50 disabled:opacity-50 dark:text-red-400 dark:hover:bg-red-500/10"
         >
           Delete
         </button>
@@ -142,7 +142,7 @@ function BotRow({ bot, onSaved }: { bot: BotDTO; onSaved: () => void }) {
         value={value}
         onChange={(e) => setValue(e.target.value)}
         placeholder="https://example.com/webhook"
-        className="mb-2 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+        className="mb-2 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 dark:placeholder:text-gray-400"
       />
       <div className="flex gap-2">
         <button
@@ -161,13 +161,13 @@ function BotRow({ bot, onSaved }: { bot: BotDTO; onSaved: () => void }) {
               save('');
             }}
             disabled={busy}
-            className="rounded-full bg-gray-200 px-4 py-1.5 text-sm font-semibold text-gray-700 disabled:opacity-50"
+            className="rounded-full bg-gray-200 px-4 py-1.5 text-sm font-semibold text-gray-700 disabled:opacity-50 dark:bg-gray-700 dark:text-gray-200"
           >
             Clear
           </button>
         )}
       </div>
-      {error && <p className="mt-2 text-sm text-red-600">{error}</p>}
+      {error && <p className="mt-2 text-sm text-red-600 dark:text-red-400">{error}</p>}
     </li>
   );
 }
@@ -202,14 +202,14 @@ function CreateBotSection({ onCreated }: { onCreated: () => void }) {
 
   return (
     <section className="mb-6">
-      <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">
+      <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
         Create a bot
       </h2>
 
       {token && <TokenReveal name={token.name} apiToken={token.apiToken} onDismiss={() => setToken(null)} />}
 
-      <form onSubmit={submit} className="rounded-xl bg-gray-50 p-4">
-        <label className="mb-1 block text-sm font-medium text-gray-700" htmlFor="bot-name">
+      <form onSubmit={submit} className="rounded-xl bg-gray-50 p-4 dark:bg-gray-800">
+        <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200" htmlFor="bot-name">
           Display name
         </label>
         <input
@@ -218,11 +218,11 @@ function CreateBotSection({ onCreated }: { onCreated: () => void }) {
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder="Echo Bot"
-          className="mb-3 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+          className="mb-3 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 dark:placeholder:text-gray-400"
         />
 
-        <label className="mb-1 block text-sm font-medium text-gray-700" htmlFor="bot-webhook">
-          Webhook URL <span className="font-normal text-gray-400">(optional)</span>
+        <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200" htmlFor="bot-webhook">
+          Webhook URL <span className="font-normal text-gray-400 dark:text-gray-500">(optional)</span>
         </label>
         <input
           id="bot-webhook"
@@ -231,7 +231,7 @@ function CreateBotSection({ onCreated }: { onCreated: () => void }) {
           value={webhookUrl}
           onChange={(e) => setWebhookUrl(e.target.value)}
           placeholder="https://example.com/webhook"
-          className="mb-3 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+          className="mb-3 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 dark:placeholder:text-gray-400"
         />
 
         <button
@@ -241,7 +241,7 @@ function CreateBotSection({ onCreated }: { onCreated: () => void }) {
         >
           {busy ? 'Creating…' : 'Create bot'}
         </button>
-        {error && <p className="mt-2 text-sm text-red-600">{error}</p>}
+        {error && <p className="mt-2 text-sm text-red-600 dark:text-red-400">{error}</p>}
       </form>
     </section>
   );
@@ -270,12 +270,12 @@ function TokenReveal({
   }
 
   return (
-    <div className="mb-3 rounded-xl border border-amber-300 bg-amber-50 p-4">
-      <p className="mb-1 text-sm font-semibold text-amber-900">API token for {name}</p>
-      <p className="mb-2 text-xs text-amber-800">
+    <div className="mb-3 rounded-xl border border-amber-300 bg-amber-50 p-4 dark:border-amber-500/40 dark:bg-amber-500/10">
+      <p className="mb-1 text-sm font-semibold text-amber-900 dark:text-amber-200">API token for {name}</p>
+      <p className="mb-2 text-xs text-amber-800 dark:text-amber-300">
         Copy this now — it will not be shown again.
       </p>
-      <code className="mb-3 block w-full break-all rounded-lg bg-white px-3 py-2 font-mono text-xs text-gray-900">
+      <code className="mb-3 block w-full break-all rounded-lg bg-white px-3 py-2 font-mono text-xs text-gray-900 dark:bg-gray-900 dark:text-gray-100">
         {apiToken}
       </code>
       <div className="flex gap-2">
@@ -289,7 +289,7 @@ function TokenReveal({
         <button
           type="button"
           onClick={onDismiss}
-          className="rounded-full bg-gray-200 px-4 py-1.5 text-sm font-semibold text-gray-700"
+          className="rounded-full bg-gray-200 px-4 py-1.5 text-sm font-semibold text-gray-700 dark:bg-gray-700 dark:text-gray-200"
         >
           Done
         </button>
