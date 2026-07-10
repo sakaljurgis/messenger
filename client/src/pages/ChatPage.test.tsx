@@ -720,6 +720,59 @@ describe('ChatPage', () => {
     expect(await screen.findByRole('button', { name: '👍 1, including you' })).toBeInTheDocument();
   });
 
+  it('anchors the actions popover inward: left on received messages, right on mine', async () => {
+    stubFetch({ messages: [msg(1, bob, 'Hi from Bob'), msg(2, me, 'Hi from me')] });
+    renderChatPage();
+
+    await screen.findByText('Hi from Bob');
+
+    // Received message: the popover hangs off the LEFT edge (opening rightward,
+    // into the screen) — right-anchoring it to a short bubble near the left
+    // screen edge pushed it off-screen.
+    const theirWrap = screen.getByText('Hi from Bob').closest('.group') as HTMLElement;
+    await userEvent.click(within(theirWrap).getByLabelText('Message actions'));
+    const theirMenu = screen.getByRole('menu');
+    expect(theirMenu.className).toContain('left-0');
+    expect(theirMenu.className).not.toContain('right-0');
+    await userEvent.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument());
+
+    // My message: right-anchored, opening leftward.
+    const myWrap = screen.getByText('Hi from me').closest('.group') as HTMLElement;
+    await userEvent.click(within(myWrap).getByLabelText('Message actions'));
+    expect(screen.getByRole('menu').className).toContain('right-0');
+  });
+
+  it('places the hidden actions button inward so it never indents a bubble', async () => {
+    stubFetch({ messages: [msg(1, bob, 'Hi from Bob'), msg(2, me, 'Hi from me')] });
+    renderChatPage();
+
+    await screen.findByText('Hi from Bob');
+
+    // Received: bubble first, button after — an invisible button BEFORE the
+    // bubble still takes flex space and shifted the bubble right of its
+    // timestamp/reaction chips.
+    const theirWrap = screen.getByText('Hi from Bob').closest('.group') as HTMLElement;
+    expect(theirWrap.lastElementChild).toBe(within(theirWrap).getByLabelText('Message actions'));
+
+    // Mine: button first, hanging inward off the right-aligned bubble.
+    const myWrap = screen.getByText('Hi from me').closest('.group') as HTMLElement;
+    expect(myWrap.firstElementChild).toBe(within(myWrap).getByLabelText('Message actions'));
+  });
+
+  it('suppresses the native long-press selection UI on the bubble wrapper', async () => {
+    stubFetch({ messages: [msg(1, bob, 'Hi from Bob')] });
+    renderChatPage();
+
+    const bubble = await screen.findByText('Hi from Bob');
+    // The long-press target disables the OS text-selection callout on touch
+    // devices (otherwise the phone's copy/select popup opens alongside ours),
+    // while pointer:coarse scoping keeps desktop mouse selection working.
+    const pressTarget = bubble.closest('[class*="touch-callout"]') as HTMLElement | null;
+    expect(pressTarget).not.toBeNull();
+    expect(pressTarget!.className).toContain('[@media(pointer:coarse)]:select-none');
+  });
+
   it('reply action opens the reply banner naming the target sender', async () => {
     stubFetch({ messages: [msg(1, bob, 'Hi from Bob')] });
     renderChatPage();

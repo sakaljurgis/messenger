@@ -78,14 +78,22 @@ function TombstoneBubble() {
  * emoji reaction picker (every member may react); `onReply` (every non-deleted
  * message) and `onEdit`/`onDelete` (own messages only), when provided, add
  * Reply/Edit/Delete rows below it. Closes on an outside tap/click or Escape.
+ *
+ * `isMine` picks the side everything hangs off: the '⋯' button sits toward the
+ * screen center (after the bubble for received messages, before it for mine) so
+ * it never pushes a bubble away from its screen edge, and the popover anchors
+ * to that same edge (left-0 for received, right-0 for mine) so it always opens
+ * inward — a short bubble near an edge can't push it off-screen.
  */
 function MessageActions({
+  isMine,
   onReact,
   onReply,
   onEdit,
   onDelete,
   children,
 }: {
+  isMine: boolean;
   onReact: (emoji: string) => void;
   onReply?: () => void;
   onEdit?: () => void;
@@ -121,19 +129,27 @@ function MessageActions({
     }
   }
 
+  const dotsButton = (
+    <button
+      type="button"
+      aria-label="Message actions"
+      aria-haspopup="menu"
+      aria-expanded={open}
+      onClick={() => setOpen((v) => !v)}
+      className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full text-gray-400 opacity-0 transition-opacity hover:bg-gray-100 focus:opacity-100 group-hover:opacity-100"
+    >
+      <DotsIcon />
+    </button>
+  );
+
   return (
     <div ref={wrapRef} className="group relative flex items-center gap-1">
-      <button
-        type="button"
-        aria-label="Message actions"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
-        className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full text-gray-400 opacity-0 transition-opacity hover:bg-gray-100 focus:opacity-100 group-hover:opacity-100"
-      >
-        <DotsIcon />
-      </button>
+      {isMine && dotsButton}
       <div
+        // Suppress the OS long-press UI (text-selection handles / copy callout)
+        // on touch devices so only our popover appears; pointer:coarse keeps
+        // desktop mouse selection working.
+        className="min-w-0 [-webkit-touch-callout:none] [@media(pointer:coarse)]:select-none"
         onTouchStart={() => {
           cancelPress();
           timerRef.current = window.setTimeout(() => setOpen(true), LONG_PRESS_MS);
@@ -147,10 +163,13 @@ function MessageActions({
       >
         {children}
       </div>
+      {!isMine && dotsButton}
       {open && (
         <div
           role="menu"
-          className="absolute right-0 top-full z-10 mt-1 min-w-[8rem] overflow-hidden rounded-xl border border-gray-200 bg-white py-1 shadow-lg"
+          className={`absolute top-full z-10 mt-1 min-w-[8rem] overflow-hidden rounded-xl border border-gray-200 bg-white py-1 shadow-lg ${
+            isMine ? 'right-0' : 'left-0'
+          }`}
         >
           <div className="flex gap-0.5 px-1.5 py-1">
             {REACTION_EMOJIS.map((emoji) => (
@@ -569,6 +588,7 @@ function MessageRow({
             <TombstoneBubble />
           ) : (
             <MessageActions
+              isMine
               onReact={(emoji) => onReact(message, emoji)}
               onReply={() => onReply(message)}
               onEdit={() => onEdit(message)}
@@ -623,6 +643,7 @@ function MessageRow({
             <TombstoneBubble />
           ) : (
             <MessageActions
+              isMine={false}
               onReact={(emoji) => onReact(message, emoji)}
               onReply={() => onReply(message)}
             >
