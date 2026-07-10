@@ -1,0 +1,1 @@
+UPDATE `attachments` SET `kind` = 'video' WHERE `mime_type` = 'video/quicktime';

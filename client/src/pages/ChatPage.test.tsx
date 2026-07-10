@@ -341,6 +341,23 @@ describe('ChatPage', () => {
     expect(video.hasAttribute('playsinline')).toBe(true);
   });
 
+  it('falls back to the download card when the browser cannot play a video', async () => {
+    const vidMsg: MessageDTO = {
+      ...msg(1, bob, ''),
+      attachments: [videoAttachment(77, 'clip.mov')],
+    };
+    stubFetch({ messages: [vidMsg] });
+    renderChatPage();
+
+    // The element erroring (e.g. an HEVC .mov in a browser without the codec)
+    // swaps the player for the regular file download card.
+    fireEvent.error(await screen.findByTestId('video-attachment'));
+
+    expect(screen.queryByTestId('video-attachment')).not.toBeInTheDocument();
+    const card = screen.getByText('clip.mov').closest('a') as HTMLAnchorElement;
+    expect(card.getAttribute('href')).toBe('/api/attachments/77?download=1');
+  });
+
   it('renders a video as its own block, never inside the image grid', async () => {
     const mixedMsg: MessageDTO = {
       ...msg(1, bob, ''),

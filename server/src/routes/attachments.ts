@@ -29,11 +29,14 @@ const IMAGE_MIMES = new Set([
 ]);
 
 /**
- * The only two video mimes the client renders inline (<video>, browser-decodable
- * everywhere we care about). Any other video/* stays kind 'file' — a download
- * card, same as an unrecognized document.
+ * Video mimes the client renders inline (<video>). mp4/webm decode everywhere;
+ * quicktime (.mov — what iPhones record) plays natively in Safari and usually
+ * in Chrome (H.264 tracks), and the client swaps in a download card via the
+ * <video> element's onError when a browser genuinely can't decode one. Any
+ * other video/* stays kind 'file' — a download card, same as an unrecognized
+ * document.
  */
-const VIDEO_MIMES = new Set(['video/mp4', 'video/webm']);
+const VIDEO_MIMES = new Set(['video/mp4', 'video/webm', 'video/quicktime']);
 
 const CHAT_NOT_FOUND = { error: 'Chat not found' };
 const NOT_FOUND = { error: 'Not found' };

@@ -185,13 +185,24 @@ describe('POST /api/chats/:chatId/attachments — upload', () => {
     expect(a2.mimeType).toBe('video/webm');
   });
 
-  it('classifies any other video/* mime as a plain file (no inline rendering)', async () => {
+  it('classifies quicktime (.mov, iPhone recordings) as inline video', async () => {
     const mov = randomBytes(2048);
     const res = await upload(alice, dm, mov, 'clip.mov', 'video/quicktime');
     expect(res.status).toBe(201);
     const a = res.body.attachment as AttachmentDTO;
-    expect(a.kind).toBe('file');
+    expect(a.kind).toBe('video');
     expect(a.mimeType).toBe('video/quicktime');
+    expect(a.width).toBeNull();
+    expect(a.height).toBeNull();
+  });
+
+  it('classifies any other video/* mime as a plain file (no inline rendering)', async () => {
+    const avi = randomBytes(2048);
+    const res = await upload(alice, dm, avi, 'clip.avi', 'video/x-msvideo');
+    expect(res.status).toBe(201);
+    const a = res.body.attachment as AttachmentDTO;
+    expect(a.kind).toBe('file');
+    expect(a.mimeType).toBe('video/x-msvideo');
     expect(a.width).toBeNull();
     expect(a.height).toBeNull();
   });
@@ -456,7 +467,7 @@ describe('GET /api/attachments/:id — serving', () => {
 
   it('keeps an unsafe video/* (kind file) forced to download, even on a 206 partial response', async () => {
     const bytes = randomBytes(5000);
-    const up = await upload(alice, group, bytes, 'clip.mov', 'video/quicktime');
+    const up = await upload(alice, group, bytes, 'clip.avi', 'video/x-msvideo');
     const att = up.body.attachment as AttachmentDTO;
     await alice.agent
       .post(`/api/chats/${group}/messages`)

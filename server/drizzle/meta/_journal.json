@@ -57,6 +57,13 @@
       "when": 1783700000001,
       "tag": "0007_user_colors",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1783700000002,
+      "tag": "0008_quicktime_video",
+      "breakpoints": true
     }
   ]
 }

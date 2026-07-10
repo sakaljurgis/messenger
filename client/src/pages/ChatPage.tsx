@@ -447,13 +447,18 @@ function AttachmentImages({
  * without downloading the whole file up front. Always its own block — never
  * placed inside the image grid.
  */
-function AttachmentVideo({ video }: { video: AttachmentDTO }) {
+function AttachmentVideo({ video, isMine }: { video: AttachmentDTO; isMine: boolean }) {
+  // Codec support varies (e.g. HEVC .mov from iPhones won't decode in every
+  // browser) — when the element errors, degrade to the plain download card.
+  const [failed, setFailed] = useState(false);
+  if (failed) return <AttachmentFile file={video} isMine={isMine} />;
   return (
     <video
       controls
       playsInline
       preload="metadata"
       src={attachmentUrl(video.id)}
+      onError={() => setFailed(true)}
       data-testid="video-attachment"
       className="max-h-80 max-w-full rounded-2xl bg-black"
     />
@@ -555,7 +560,7 @@ function MessageStack({
       )}
       {images.length > 0 && <AttachmentImages images={images} onOpen={onOpenImage} />}
       {videos.map((v) => (
-        <AttachmentVideo key={v.id} video={v} />
+        <AttachmentVideo key={v.id} video={v} isMine={isMine} />
       ))}
       {files.map((f) => (
         <AttachmentFile key={f.id} file={f} isMine={isMine} />
