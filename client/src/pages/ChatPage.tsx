@@ -12,8 +12,9 @@ import {
 import { useAuth } from '../lib/auth';
 import { MessageMarkdown } from '../lib/markdown';
 import {
-  avatarHue,
+  accentColor,
   chatTitle,
+  groupColors,
   firstUnreadMessageId,
   formatDaySeparator,
   formatMessageTime,
@@ -65,11 +66,6 @@ const LONG_PRESS_MS = 500;
 
 /** Gap between a bubble and its actions popover (the mt-1/mb-1 spacing). */
 const MENU_GAP_PX = 4;
-
-/** A member's accent color: their picked color, else the id-derived hue Avatar uses. */
-function accentColor(user: UserDTO): string {
-  return user.color ?? `hsl(${avatarHue(user.id)} 70% 45%)`;
-}
 
 /** A deleted message: a muted, italic outline bubble with no fill and no menu. */
 function TombstoneBubble() {
@@ -906,6 +902,10 @@ export default function ChatPage() {
   const onlineIds = useOnlineUsers();
   const dmOther = chat && !isGroup ? otherMember(chat, meId) : undefined;
   const otherOnline = dmOther ? onlineIds.has(dmOther.id) : false;
+  // Header-avatar owner for a DM: the other member, or ME for notes-to-self
+  // (no presence dot there — dmOther stays undefined so otherOnline is false).
+  const dmPeer =
+    chat && !isGroup ? (dmOther ?? chat.members.find((m) => m.id === meId)) : undefined;
   const typingIds = useChatTyping(chatId, meId);
   const typingNames = [...typingIds]
     .map((id) => members.find((m) => m.id === id)?.displayName)
@@ -1133,9 +1133,10 @@ export default function ChatPage() {
         {chat && (
           <Avatar
             name={title}
-            id={isGroup ? chat.id : (dmOther?.id ?? chat.id)}
+            id={isGroup ? chat.id : (dmPeer?.id ?? chat.id)}
             online={otherOnline}
-            color={isGroup ? undefined : dmOther?.color}
+            color={isGroup ? undefined : dmPeer?.color}
+            colors={isGroup ? groupColors(chat.members) : undefined}
           />
         )}
         {isGroup ? (

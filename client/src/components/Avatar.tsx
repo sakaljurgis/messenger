@@ -31,15 +31,40 @@ interface AvatarProps {
    * falls back to the id-derived color exactly as before.
    */
   color?: string | null;
+  /**
+   * Group avatars: 2+ colors render as an equal-slice conic-gradient pie of
+   * the members' accent colors (see groupColors in lib/chats). Fewer than 2
+   * entries is ignored — the color/derived fallback applies as usual.
+   */
+  colors?: string[];
+}
+
+/** Equal-slice pie, e.g. conic-gradient(#a 0deg 120deg, #b 120deg 240deg, …). */
+function pieGradient(colors: string[]): string {
+  const slice = 360 / colors.length;
+  const stops = colors.map((c, i) => `${c} ${i * slice}deg ${(i + 1) * slice}deg`);
+  return `conic-gradient(${stops.join(', ')})`;
 }
 
 /** Colored circle with up to two white initials, plus an optional online dot. Decorative (aria-hidden). */
-export default function Avatar({ name, id, size = 'md', className = '', online = false, color }: AvatarProps) {
+export default function Avatar({
+  name,
+  id,
+  size = 'md',
+  className = '',
+  online = false,
+  color,
+  colors,
+}: AvatarProps) {
   const hue = avatarHue(id);
+  const background =
+    colors && colors.length >= 2
+      ? { backgroundImage: pieGradient(colors) }
+      : { backgroundColor: color ?? `hsl(${hue} 70% 45%)` };
   return (
     <div
       className={`relative flex flex-shrink-0 items-center justify-center rounded-full font-semibold text-white ${sizeClasses[size]} ${className}`}
-      style={{ backgroundColor: color ?? `hsl(${hue} 70% 45%)` }}
+      style={background}
       aria-hidden="true"
     >
       {chatInitials(name)}

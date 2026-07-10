@@ -48,4 +48,24 @@ describe('Avatar color', () => {
     const circle = container.firstChild as HTMLElement;
     expect(circle.style.backgroundColor).toBe('rgb(255, 136, 0)');
   });
+
+  it('renders 2+ colors as an equal-slice conic-gradient pie', () => {
+    const { container } = render(<Avatar name="Team" id={9} colors={['#ff0000', '#00ff00', '#0000ff']} />);
+    const circle = container.firstChild as HTMLElement;
+    // jsdom serializes the hex stops back as rgb().
+    expect(circle.style.backgroundImage).toBe(
+      'conic-gradient(rgb(255, 0, 0) 0deg 120deg, rgb(0, 255, 0) 120deg 240deg, rgb(0, 0, 255) 240deg 360deg)',
+    );
+    expect(circle.style.backgroundColor).toBe('');
+  });
+
+  it('ignores a colors array with fewer than 2 entries (falls back to color/derived)', () => {
+    const single = render(<Avatar name="Team" id={9} colors={['#ff0000']} />);
+    const derived = render(<Avatar name="Team" id={9} />);
+    const singleEl = single.container.firstChild as HTMLElement;
+    expect(singleEl.style.backgroundImage).toBe('');
+    expect(singleEl.style.backgroundColor).toBe(
+      (derived.container.firstChild as HTMLElement).style.backgroundColor,
+    );
+  });
 });

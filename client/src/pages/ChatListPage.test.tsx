@@ -141,6 +141,37 @@ describe('ChatListPage', () => {
     expect(screen.getByText('2')).toBeInTheDocument();
   });
 
+  it("notes-to-self row uses MY accent color (I'm the DM's only member)", async () => {
+    const coloredMe: ChatMemberDTO = { ...me, color: '#12ab34' };
+    const notes: ChatSummaryDTO = {
+      id: 12, type: 'dm', name: null, members: [coloredMe], lastMessage: null, unreadCount: 0,
+    };
+    stubFetch([notes]);
+    renderChatList();
+
+    const row = (await screen.findByText('Notes to self')).closest('a') as HTMLElement;
+    const avatar = row.querySelector('[aria-hidden="true"]') as HTMLElement;
+    expect(avatar).toHaveStyle({ backgroundColor: '#12ab34' });
+  });
+
+  it("group row avatar is a pie of the members' accent colors in stable id order", async () => {
+    const coloredBob: ChatMemberDTO = { ...bob, color: '#0000ff' };
+    const group: ChatSummaryDTO = {
+      // Members deliberately out of id order — the pie sorts by id.
+      id: 11, type: 'group', name: 'Team', members: [coloredBob, { ...me, color: '#ff0000' }],
+      lastMessage: null, unreadCount: 0,
+    };
+    stubFetch([group]);
+    renderChatList();
+
+    const row = (await screen.findByText('Team')).closest('a') as HTMLElement;
+    const avatar = row.querySelector('[aria-hidden="true"]') as HTMLElement;
+    // jsdom serializes the hex stops back as rgb(); me (id 1) sorts before Bob (id 2).
+    expect(avatar.style.backgroundImage).toBe(
+      'conic-gradient(rgb(255, 0, 0) 0deg 180deg, rgb(0, 0, 255) 180deg 360deg)',
+    );
+  });
+
   it('marks group rows with a member-count badge; DM rows have none', async () => {
     stubFetch(chats);
     renderChatList();

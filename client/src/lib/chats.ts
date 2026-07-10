@@ -64,6 +64,23 @@ export function avatarHue(id: number): number {
   return Math.abs(hash) % 360;
 }
 
+/** A member's accent color: their picked color, else the id-derived hue Avatar uses. */
+export function accentColor(user: UserDTO): string {
+  return user.color ?? `hsl(${avatarHue(user.id)} 70% 45%)`;
+}
+
+/**
+ * The accent colors backing a group avatar's pie: the first `max` members in
+ * stable id order (so the pie never reshuffles as the member array reorders),
+ * each resolved through accentColor.
+ */
+export function groupColors(members: UserDTO[], max = 6): string[] {
+  return [...members]
+    .sort((a, b) => a.id - b.id)
+    .slice(0, max)
+    .map(accentColor);
+}
+
 /**
  * Merge two lists of messages, de-duplicating by id and keeping ascending
  * (oldest → newest) order. Later occurrences win, so a re-fetched message

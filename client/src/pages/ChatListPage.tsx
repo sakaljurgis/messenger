@@ -5,6 +5,7 @@ import { useAuth } from '../lib/auth';
 import {
   chatTitle,
   formatListTime,
+  groupColors,
   highlightSegments,
   otherMember,
   searchSnippet,
@@ -209,8 +210,10 @@ function ChatRow({
 }) {
   const title = chatTitle(chat, meId);
   const unread = chat.unreadCount > 0;
-  const other = otherMember(chat, meId);
-  const avatarId = chat.type === 'group' ? chat.id : (other?.id ?? chat.id);
+  // A DM's avatar belongs to the other member — or to ME for a notes-to-self
+  // DM (I'm its only member), so my picked color shows there too.
+  const dmPeer = otherMember(chat, meId) ?? chat.members.find((m) => m.id === meId);
+  const avatarId = chat.type === 'group' ? chat.id : (dmPeer?.id ?? chat.id);
 
   // Preview line: an italic blue "typing…" while someone types, else the last
   // message (italic for tombstones, bolder while unread).
@@ -229,7 +232,8 @@ function ChatRow({
           id={avatarId}
           size="lg"
           online={online}
-          color={chat.type === 'group' ? undefined : other?.color}
+          color={chat.type === 'group' ? undefined : dmPeer?.color}
+          colors={chat.type === 'group' ? groupColors(chat.members) : undefined}
         />
         <div className="min-w-0 flex-1">
           <div className="flex items-baseline justify-between gap-2">

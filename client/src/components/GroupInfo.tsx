@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import type { ChatSummaryDTO, UserDTO } from '@messenger/shared';
 import { apiGet, apiPatch, apiPost } from '../lib/api';
+import { groupColors } from '../lib/chats';
 import { useOnlineUsers } from '../lib/presence';
 import Avatar from './Avatar';
 
@@ -138,7 +139,12 @@ export default function GroupInfo({
 
         <div className="min-h-0 flex-1 overflow-y-auto p-3">
           <div className="mb-4 flex items-center gap-3">
-            <Avatar name={chat.name ?? 'Group'} id={chat.id} size="lg" />
+            <Avatar
+              name={chat.name ?? 'Group'}
+              id={chat.id}
+              size="lg"
+              colors={groupColors(chat.members)}
+            />
             {renaming ? (
               <form onSubmit={rename} className="flex min-w-0 flex-1 items-center gap-2">
                 <label htmlFor="group-rename" className="sr-only">
