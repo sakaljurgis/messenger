@@ -1,16 +1,25 @@
 # Messenger PWA
 
-Mobile-first PWA messenger, feature-complete through PLAN.md phase 7 plus two
-post-PoC iterations: email/password auth, profile editing (name + password),
-DMs + group chats (group-info sheet: add members, rename, leave; last member
-out deletes the chat), notes-to-self DMs, @mentions, Socket.IO real-time, web
-push, webhook bots (management UI at /bots; deletes are soft — users.deletedAt
-— so message history keeps its sender), attachments (client compression + HD
-toggle, sharp thumbnails, lightbox), message edit/delete (tombstones), read
-receipts, typing indicators, presence dots. Personal app for a couple of
-users — multi-node scaling is explicitly out of scope. PLAN.md has the
-architecture/phase history; README.md has run/deploy instructions;
-examples/README.md covers bots.
+Mobile-first PWA messenger, feature-complete for daily use: email/password
+auth, profile editing (name + password + accent color), DMs + group chats
+(group-info sheet: add members, rename, mute, leave; last member out deletes
+the chat), notes-to-self DMs, @mentions, markdown messages (react-markdown
+behind a configurable module in client/src/lib/markdown), emoji reactions,
+replies with jump-to-original, FTS5 message search with windowed history
+(?around=/?after=), Socket.IO real-time, web push + per-chat mute, webhook
+bots (management UI at /bots; deletes are soft — users.deletedAt — so message
+history keeps its sender), attachments (client compression + HD toggle, sharp
+thumbnails, lightbox, inline video/audio with Range streaming, voice
+messages), link previews (SSRF-guarded server fetcher in
+server/src/link-previews.ts, a 4th event-bus subscriber), message edit/delete
+(tombstones), offline outbox + per-chat drafts, read receipts, typing
+indicators, presence dots, dark/light/system theme, orphaned-attachment
+cleanup + /healthz. Personal app for a couple of users — multi-node scaling
+is explicitly out of scope. PLAN.md has the architecture/phase history;
+README.md has run/deploy instructions; examples/README.md covers bots.
+DB migrations: journal `when` values MUST be strictly increasing (the
+migrator skips otherwise — guarded by db/migrations.test.ts), and any
+hand-written schema migration needs a matching drizzle meta snapshot.
 
 ## Layout (npm workspaces)
 

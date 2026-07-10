@@ -1,12 +1,79 @@
 # Messenger
 
-A proof-of-concept mobile-first PWA messenger: email/password auth, user
-directory, 1:1 and group chats, @mentions with autocomplete, real-time
-delivery over Socket.IO, web push notifications when the app is closed,
-webhook-based bots, attachments (images with client-side compression + HD
-toggle, server-side thumbnails, lightbox, file downloads), message edit/delete
-with tombstones, read receipts, typing indicators, and online presence dots. See [PLAN.md](PLAN.md) for the
-architecture and [examples/README.md](examples/README.md) for bots.
+A mobile-first PWA messenger for a small circle of people, self-hosted in a
+single container. Started as a proof of concept, now feature-complete for
+daily use. See [PLAN.md](PLAN.md) for the architecture history and
+[examples/README.md](examples/README.md) for bots.
+
+## Features
+
+**Conversations**
+- 1:1 DMs, group chats (create, rename, add/remove members, leave — the last
+  member out deletes the chat), and a notes-to-self DM
+- Replies with quoted snippets — tap a quote to jump to the original, even
+  deep into history
+- Emoji reactions (fixed six-emoji picker, tap-to-toggle chips)
+- Edit and delete your own messages (deletes leave a neutral tombstone)
+- Long-press / hover popover per bubble: react, copy, reply, edit, delete —
+  position-aware so it never opens off-screen
+
+**Writing**
+- Markdown subset: **bold**, *italic*, ~~strike~~, `code`, code blocks,
+  links, lists, quotes — safe by default (raw HTML inert, images stripped,
+  `javascript:` links neutralized); configurable renderer ready for richer
+  bot messages
+- @mentions with autocomplete; being mentioned is highlighted
+- Multiline composer: Enter = newline, Shift/Ctrl/Cmd+Enter = send
+- Per-chat drafts survive switching chats and reloads
+- Offline outbox: text sends queue while offline ("sending…" bubbles) and
+  flush in order on reconnect; failures offer tap-to-retry
+- Paste or drag images straight into the composer
+
+**Media & attachments**
+- Images with client-side compression + an HD toggle, server-side
+  thumbnails, and a lightbox
+- Inline video playback (mp4/webm/mov, streamed with HTTP Range so seeking
+  and iOS work); browsers that can't decode a codec get a download card
+- Voice messages: tap the mic, record, send — inline audio player on the
+  bubble (webm/opus, or mp4/AAC on iOS)
+- Everything else becomes a download card (25MB cap; SVGs never render
+  inline — XSS hygiene)
+
+**Finding things**
+- Full-text message search (SQLite FTS5) across your chats, with highlighted
+  snippets — tapping a hit opens the chat centered on that message, with
+  "load newer/older" paging from anywhere in history
+- Unread divider ("New messages") frozen where you left off, plus a
+  jump-to-bottom pill with a live new-message count
+
+**Presence & notifications**
+- Real-time delivery over Socket.IO; typing indicators; online presence dots
+- Read receipts (Messenger-style "seen up to" avatars)
+- Web push when the app is closed — mentions get a "X mentioned you" title,
+  and tapping the notification deep-links into the chat
+- Per-chat mute (no push from that chat; unread counts still work)
+
+**Links**
+- Pasted links grow an Open Graph preview card (title, description, image),
+  fetched server-side behind an SSRF guard (private-range blocking, redirect
+  re-vetting, size/time caps)
+
+**Personalization**
+- Dark / light / system theme (no white flash on load; PWA chrome follows)
+- Pick your accent color: it colors your avatar, your name in group chats,
+  and blends into the group avatar (a pie of all members' colors)
+- Profile editing: display name and password
+
+**Bots**
+- Webhook bots with a management UI at `/bots`: incoming messages POST to
+  the bot's webhook; it replies via a Bearer-token API and fans out like any
+  human message (see [examples/README.md](examples/README.md))
+
+**PWA & ops**
+- Installable, offline app shell, hand-rolled service worker
+- `/healthz` endpoint for the reverse proxy / Docker healthcheck
+- Automatic cleanup of orphaned attachment files (abandoned uploads, deleted
+  messages)
 
 ## Quick start (dev)
 
@@ -25,15 +92,14 @@ cp .env.example .env   # paste the keys in
 ```
 
 Then enable notifications from the Settings tab (or the banner on the chat
-list). You'll get a system notification for messages received while no tab is
-connected — mentions get a "X mentioned you in …" title.
+list).
 
 ## Commands
 
 | Command | What it does |
 |---|---|
 | `npm run dev` | server + client dev servers, concurrently |
-| `npm test` | all workspace tests (236 tests: vitest + supertest + real-socket integration) |
+| `npm test` | all workspace tests (vitest + supertest + real-socket integration) |
 | `npm run typecheck` | `tsc --noEmit` in all workspaces |
 | `npm run build` | production client build |
 | `npm run db:generate -w server` | regenerate Drizzle migrations after editing `server/src/db/schema.ts` |
@@ -52,9 +118,10 @@ outside localhost — run the container behind your TLS reverse proxy. Make
 sure the proxy forwards WebSocket upgrades for `/socket.io` (nginx example:
 `proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection
 "upgrade"; proxy_http_version 1.1;` on that location), otherwise real-time
-silently falls back to polling. On iOS (16.4+), push only works after the
-PWA is installed to the home screen. Compose is a dev/test convenience —
-plain `docker run` with the same env vars works identically.
+silently falls back to polling. Point your proxy/container healthcheck at
+`GET /healthz`. On iOS (16.4+), push only works after the PWA is installed
+to the home screen. Compose is a dev/test convenience — plain `docker run`
+with the same env vars works identically.
 
 ## Bots
 
@@ -81,15 +148,19 @@ npm workspaces monorepo: `shared/` (TypeScript DTO + socket event types),
 `server/` (Express 5 + Drizzle/better-sqlite3 + Socket.IO, runs via tsx),
 `client/` (Vite + React 19 + Tailwind v4). Every message write goes through
 one service function which emits on a typed in-process event bus; Socket.IO
-(online users), web push (offline users), and bot webhooks are three
-independent subscribers to that bus. Auth is an httpOnly session cookie backed
-by a sessions table, shared by REST and the socket handshake. The PWA layer is
-a hand-rolled service worker (offline app shell, push, notification click →
-deep link into the chat) — no build-plugin magic.
+(online users), web push (offline users), bot webhooks, and the link-preview
+fetcher are four independent subscribers to that bus. Auth is an httpOnly
+session cookie backed by a sessions table, shared by REST and the socket
+handshake. The PWA layer is a hand-rolled service worker (offline app shell,
+push, notification click → deep link into the chat) — no build-plugin magic.
 
-## Known limits (deliberate PoC cuts)
+## Known limits (deliberate cuts)
 
 No E2E encryption, no email verification/password reset, single node only
-(in-process socket registry and event bus — fine for one container).
-Attachments are capped at 25MB; SVGs are never rendered inline (download
-only, XSS hygiene); videos upload fine but render as file cards, not players.
+(in-process socket registry and event bus — fine for one container). No
+WebRTC calls. Backups are expected to happen at the system level
+(`DATABASE_PATH` + `UPLOADS_DIR` are the whole state). The offline outbox
+has no idempotency key, so a send whose response is lost can duplicate on
+flush. Link-preview fetching re-vets every redirect but can't pin the
+connection IP (documented DNS-rebinding residual — acceptable for a
+private, small-circle deployment).
