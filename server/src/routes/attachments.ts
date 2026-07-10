@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import type { AttachmentKind } from '@messenger/shared';
-import { and, eq, isNull, lt } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { Router } from 'express';
 import multer from 'multer';
 import sharp from 'sharp';
@@ -339,28 +339,4 @@ export function attachmentsRouter(db: Db, storage: Storage): Router {
   });
 
   return router;
-}
-
-/**
- * Boot-time GC: deletes attachment rows (and their files + thumbs) that were
- * uploaded but never linked to a message and are older than `maxAgeMs`. Handles
- * the "user picked a file, never sent" leak. Linked attachments are always kept.
- */
-export function cleanupOrphanedAttachments(
-  db: Db,
-  storage: Storage,
-  maxAgeMs = 24 * 60 * 60 * 1000,
-): number {
-  const cutoff = new Date(Date.now() - maxAgeMs);
-  const orphans = db
-    .select()
-    .from(attachments)
-    .where(and(isNull(attachments.messageId), lt(attachments.createdAt, cutoff)))
-    .all();
-  for (const o of orphans) {
-    storage.remove(o.storagePath);
-    if (o.thumbPath) storage.remove(o.thumbPath);
-    db.delete(attachments).where(eq(attachments.id, o.id)).run();
-  }
-  return orphans.length;
 }

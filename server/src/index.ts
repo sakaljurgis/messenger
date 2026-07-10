@@ -3,10 +3,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { createApp } from './app.js';
+import { startAttachmentCleanup } from './cleanup.js';
 import { createDb } from './db/index.js';
 import { createChatEvents } from './events.js';
 import { initPush } from './push.js';
-import { cleanupOrphanedAttachments } from './routes/attachments.js';
 import { initSocket } from './socket.js';
 import { createStorage } from './storage.js';
 import { initWebhooks } from './webhooks.js';
@@ -22,11 +22,13 @@ try {
 const PORT = Number(process.env.PORT ?? 3001);
 
 const db = createDb();
-// Attachment blob store on the volume. Ensure the directory exists before serving
-// and sweep any never-linked uploads left over from a previous run.
+// Attachment blob store on the volume. Ensure the directory exists before serving.
 const storage = createStorage();
 storage.ensureDir();
-cleanupOrphanedAttachments(db, storage);
+// Reap orphaned attachments (tombstone leftovers + never-linked uploads) once at
+// boot, then on a 6h interval. The handle's timer is unref'd so it never holds
+// the process open; we don't need to keep the handle (it lives for the process).
+startAttachmentCleanup(db, storage);
 // Shared fan-out bus. Phase 3 (Socket.IO), phase 5 (web push) and phase 6
 // (webhooks) will subscribe to this same instance to relay chat/message events.
 const events = createChatEvents();

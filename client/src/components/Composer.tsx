@@ -321,6 +321,30 @@ export default function Composer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatId]);
 
+  // Drop anything staged for the PREVIOUS chat whenever the chat changes: files
+  // picked but not sent belong to that chat, not the new one, and must never
+  // ride along into it. Unlike the draft-restore effect above this is NOT
+  // gated on `editing` — attachments/errors are orthogonal to which chat owns
+  // the text field, so they're cleared regardless of edit mode. Harmless on
+  // mount, since `pending`/`sendError` both start out empty then.
+  //
+  // Object URLs are revoked via the same map-then-revoke path removePending
+  // uses, so nothing leaks. Because startUpload's `patch` locates its target
+  // by `localId` via `prev.map(...)`, an upload that finishes AFTER this
+  // clears `pending` to `[]` finds no match (map over `[]` — or over a fresh
+  // array of the new chat's own items — never contains the old localId) and
+  // is silently dropped instead of resurrecting a tile.
+  useEffect(() => {
+    setPending((prev) => {
+      for (const p of prev) {
+        if (p.previewUrl) URL.revokeObjectURL(p.previewUrl);
+      }
+      return [];
+    });
+    setSendError(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatId]);
+
   // Auto-grow the textarea to fit its content, up to MAX_TEXTAREA_HEIGHT; reset
   // to a single row when cleared. (scrollHeight is 0 under jsdom — a no-op there.)
   useEffect(() => {

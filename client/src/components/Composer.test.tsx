@@ -372,6 +372,68 @@ describe('Composer attachments', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: /send/i })).not.toBeDisabled());
     expect(uploadAttachment).toHaveBeenCalledTimes(2);
   });
+
+  it('drops a staged attachment (and revokes its preview URL) when chatId changes', async () => {
+    const revokeSpy = vi.spyOn(URL, 'revokeObjectURL');
+    const props = { onSend: vi.fn(), members: [me], meId: me.id };
+    const { rerender } = render(<Composer {...props} chatId={10} />);
+
+    // An image gets an object-URL preview (unlike a plain file) — this is what
+    // exercises the revoke path.
+    const file = fakeFile('holiday.jpg', 'image/jpeg', 500 * 1024);
+    fireEvent.change(screen.getByTestId('file-input'), { target: { files: [file] } });
+    await waitFor(() => expect(screen.getByRole('button', { name: /send/i })).not.toBeDisabled());
+    expect(screen.getByLabelText('Attachments to send')).toBeInTheDocument();
+
+    rerender(<Composer {...props} chatId={20} />);
+
+    // The tile from chat 10 is gone and its blob URL was revoked; the chat-20
+    // composer starts with no attachments, so send is disabled again.
+    expect(screen.queryByLabelText('Attachments to send')).not.toBeInTheDocument();
+    expect(revokeSpy).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: /send/i })).toBeDisabled();
+
+    revokeSpy.mockRestore();
+  });
+
+  it('does not resurrect a tile when an old chat upload completes after switching', async () => {
+    let resolveUpload!: (a: AttachmentDTO) => void;
+    (uploadAttachment as Mock).mockImplementationOnce(
+      () =>
+        new Promise<AttachmentDTO>((resolve) => {
+          resolveUpload = resolve;
+        }),
+    );
+    const props = { onSend: vi.fn(), members: [me], meId: me.id };
+    const { rerender } = render(<Composer {...props} chatId={10} />);
+
+    const file = new File(['pdf'], 'report.pdf', { type: 'application/pdf' });
+    fireEvent.change(screen.getByTestId('file-input'), { target: { files: [file] } });
+    expect(screen.getByLabelText('Attachments to send')).toBeInTheDocument();
+
+    // Switch chats while the upload for chat 10 is still in flight.
+    rerender(<Composer {...props} chatId={20} />);
+    expect(screen.queryByLabelText('Attachments to send')).not.toBeInTheDocument();
+
+    // The old chat's upload finally resolves — it must not bring the tile back.
+    resolveUpload(dto);
+    await waitFor(() => expect(uploadAttachment).toHaveBeenCalledTimes(1));
+    expect(screen.queryByLabelText('Attachments to send')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /send/i })).toBeDisabled();
+  });
+
+  it('clears the send-error banner when chatId changes', async () => {
+    const onSend = vi.fn().mockRejectedValueOnce(new Error('boom'));
+    const props = { onSend, members: [me], meId: me.id };
+    const { rerender } = render(<Composer {...props} chatId={10} />);
+
+    await userEvent.type(screen.getByPlaceholderText('Aa'), 'hello');
+    await userEvent.click(screen.getByRole('button', { name: /send/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('boom');
+
+    rerender(<Composer {...props} chatId={20} />);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
 });
 
 describe('Composer multiline textarea', () => {

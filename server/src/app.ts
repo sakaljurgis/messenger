@@ -1,5 +1,6 @@
 import express from 'express';
 import cookieParser from 'cookie-parser';
+import { sql } from 'drizzle-orm';
 import type { Db } from './db/index.js';
 import { sessionMiddleware } from './auth/session.js';
 import { createChatEvents, type ChatEvents } from './events.js';
@@ -38,6 +39,20 @@ export function createApp(
 
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true });
+  });
+
+  // Liveness probe for the reverse proxy fronting the app. Deliberately NOT
+  // under /api (the proxy points its health check straight at /healthz) and
+  // unauthenticated. A trivial DB round-trip proves the process can reach its
+  // store; anything thrown → 503. No version/secret info in either response.
+  // (Express 5: a plain static path, no wildcard pattern.)
+  app.get('/healthz', (_req, res) => {
+    try {
+      db.get(sql`select 1`);
+      res.json({ ok: true });
+    } catch {
+      res.status(503).json({ ok: false });
+    }
   });
 
   // Routers are mounted here as phases land:

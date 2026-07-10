@@ -561,57 +561,6 @@ describe('GET /api/attachments/:id — serving', () => {
   });
 });
 
-describe('cleanupOrphanedAttachments', () => {
-  it('removes only old unlinked rows and their files', async () => {
-    const { db, storage, app } = makeCtx();
-    const { cleanupOrphanedAttachments } = await import('./attachments.js');
-    const alice = await register(app, 'alice@example.com', 'Alice');
-    const bob = await register(app, 'bob@example.com', 'Bob');
-    const group = await makeGroup(alice, [bob.user.id]);
-
-    async function uploadOne(name: string): Promise<AttachmentDTO> {
-      const png = await makePng(120, 120);
-      const res = await upload(alice, group, png, name, 'image/png');
-      return res.body.attachment as AttachmentDTO;
-    }
-
-    const oldUnlinked = await uploadOne('old.png');
-    const freshUnlinked = await uploadOne('fresh.png');
-    const linkedAtt = await uploadOne('linked.png');
-    await alice.agent
-      .post(`/api/chats/${group}/messages`)
-      .send({ content: '', attachmentIds: [linkedAtt.id] });
-
-    // Backdate the old one past the 24h window.
-    const oldRow = db
-      .select()
-      .from(attachments)
-      .where(eq(attachments.id, oldUnlinked.id))
-      .get()!;
-    db.update(attachments)
-      .set({ createdAt: new Date(Date.now() - 48 * 60 * 60 * 1000) })
-      .where(eq(attachments.id, oldUnlinked.id))
-      .run();
-
-    const removed = cleanupOrphanedAttachments(db, storage);
-    expect(removed).toBe(1);
-
-    // Old unlinked row + its file are gone.
-    expect(
-      db.select().from(attachments).where(eq(attachments.id, oldUnlinked.id)).get(),
-    ).toBeUndefined();
-    expect(fs.existsSync(path.join(scratchDir, oldRow.storagePath))).toBe(false);
-
-    // Fresh unlinked and linked survive.
-    expect(
-      db.select().from(attachments).where(eq(attachments.id, freshUnlinked.id)).get(),
-    ).toBeDefined();
-    expect(
-      db.select().from(attachments).where(eq(attachments.id, linkedAtt.id)).get(),
-    ).toBeDefined();
-  });
-});
-
 describe('buildPushPayload — attachment previews', () => {
   const sender: UserDTO = { id: 1, email: 'a@x.com', displayName: 'Alice', isBot: false };
   const group = { id: 11, type: 'group', name: 'Team' } as ChatRow;
