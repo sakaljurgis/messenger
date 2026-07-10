@@ -296,6 +296,23 @@ describe('Composer reply mode', () => {
   });
 });
 
+describe('Composer control row', () => {
+  it('every control shares the h-10 footprint (items-end row: a shorter one sinks)', () => {
+    render(<Composer onSend={vi.fn()} members={[me]} meId={me.id} chatId={10} />);
+
+    // No mic button here: jsdom lacks MediaRecorder so it doesn't render (and
+    // it shares its class literal with Attach files, covered below).
+    const controls = [
+      screen.getByRole('button', { name: 'Attach files' }),
+      screen.getByRole('button', { name: 'HD' }),
+      screen.getByRole('button', { name: /send/i }),
+    ];
+    for (const control of controls) {
+      expect(control.className, control.getAttribute('aria-label') ?? 'HD').toContain('h-10');
+    }
+  });
+});
+
 describe('Composer attachments', () => {
   beforeEach(() => {
     (uploadAttachment as Mock).mockResolvedValue(dto);

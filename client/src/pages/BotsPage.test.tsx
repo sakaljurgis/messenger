@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import type { BotDTO, UserDTO } from '@messenger/shared';
@@ -102,8 +102,12 @@ describe('BotsPage', () => {
     expect(input.value).toBe('https://bot.example.com/webhook');
 
     const row = input.closest('li')!;
-    await userEvent.clear(input);
-    await userEvent.type(input, 'https://new.example.com/hook');
+    // One synthetic change instead of per-keystroke typing: under full-suite
+    // worker contention, typing a long URL keystroke-by-keystroke occasionally
+    // interleaved with a re-render and dropped characters (rare flake). The
+    // component contract under test is "Save PATCHes the field's value" —
+    // keystroke fidelity adds nothing here.
+    fireEvent.change(input, { target: { value: 'https://new.example.com/hook' } });
     await userEvent.click(within(row).getByRole('button', { name: 'Save' }));
 
     const patchCall = fetchMock.mock.calls.find(

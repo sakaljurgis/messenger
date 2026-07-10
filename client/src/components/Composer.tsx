@@ -1244,7 +1244,9 @@ export default function Composer({
               onClick={() => setHd((v) => !v)}
               aria-pressed={hd}
               title="Upload original quality"
-              className={`flex h-8 flex-shrink-0 items-center justify-center rounded-full px-2 text-xs font-bold transition-colors ${
+              // Same h-10 footprint as every other control in this items-end
+              // row — a shorter pill sits visibly sunken against the bottom line.
+              className={`flex h-10 min-w-10 flex-shrink-0 items-center justify-center rounded-full px-2.5 text-xs font-bold transition-colors ${
                 hd ? 'bg-[#0084ff] text-white' : 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-400'
               }`}
             >
