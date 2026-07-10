@@ -179,6 +179,55 @@ function RemoveIcon() {
   );
 }
 
+function MicIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+      <rect x="9" y="2" width="6" height="12" rx="3" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M5 11a7 7 0 0 0 14 0M12 18v3" />
+    </svg>
+  );
+}
+
+function StopIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="h-5 w-5" fill="currentColor" aria-hidden="true">
+      <rect x="6" y="6" width="12" height="12" rx="2" />
+    </svg>
+  );
+}
+
+/**
+ * MediaRecorder mimeTypes to try, in order. webm/opus is what Chrome/Firefox
+ * record; iOS Safari's MediaRecorder supports NONE of the webm variants and
+ * falls through to audio/mp4 (AAC). The first `isTypeSupported` hit wins; a
+ * browser with MediaRecorder but no match records in its default format.
+ */
+const AUDIO_MIME_CANDIDATES = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'];
+
+/** The first MediaRecorder-supported audio mime, or undefined (use the default). */
+function pickAudioMimeType(): string | undefined {
+  if (typeof MediaRecorder === 'undefined' || typeof MediaRecorder.isTypeSupported !== 'function') {
+    return undefined;
+  }
+  return AUDIO_MIME_CANDIDATES.find((t) => MediaRecorder.isTypeSupported(t));
+}
+
+/** File extension for a recorded-audio mime (parameters ignored). */
+function audioExtForMime(mime: string): string {
+  const base = mime.split(';')[0]!.trim().toLowerCase();
+  if (base === 'audio/mp4') return 'm4a';
+  if (base === 'audio/mpeg') return 'mp3';
+  if (base === 'audio/ogg') return 'oga';
+  return 'webm'; // audio/webm and any unknown default
+}
+
+/** `m:ss` elapsed-time label for the recording indicator. */
+function formatDuration(totalSeconds: number): string {
+  const m = Math.floor(totalSeconds / 60);
+  const s = totalSeconds % 60;
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
 /** One tile in the preview strip: image thumbnail or file chip, with progress/error/remove. */
 function PendingTile({
   item,
@@ -259,6 +308,18 @@ export default function Composer({
   const [pending, setPending] = useState<PendingAttachment[]>([]);
   const [hd, setHd] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+  // Voice recording. `recording` drives the recording-bar UI; `recordSeconds`
+  // ticks the elapsed-time label. The MediaRecorder/stream/chunks live in refs
+  // (never in render state) so unmount/chat-switch cleanup can reach them.
+  const [recording, setRecording] = useState(false);
+  const [recordSeconds, setRecordSeconds] = useState(0);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const recordMimeRef = useRef<string>('audio/webm');
+  const recordTimerRef = useRef<number | null>(null);
+  // Set by cancel so the recorder's async `onstop` discards instead of enqueuing.
+  const recordCanceledRef = useRef(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   // Members the user explicitly selected; reconciled against the final text on
@@ -286,6 +347,15 @@ export default function Composer({
   const canSend = isEditing
     ? trimmed.length > 0 && !disabled
     : (trimmed.length > 0 || doneCount > 0) && !uploading && !disabled;
+
+  // Voice recording needs both getUserMedia and MediaRecorder; when either is
+  // missing (older/locked-down browsers, jsdom) the mic button is hidden
+  // outright. Computed each render so a test stubbing the globals is picked up.
+  const recordingSupported =
+    typeof navigator !== 'undefined' &&
+    !!navigator.mediaDevices &&
+    typeof navigator.mediaDevices.getUserMedia === 'function' &&
+    typeof MediaRecorder !== 'undefined';
 
   const mentionPool = useMemo(() => members.filter((m) => m.id !== meId), [members, meId]);
 
@@ -371,6 +441,20 @@ export default function Composer({
     };
   }, []);
 
+  // Abort any in-progress recording — and release the mic — on chat switch or
+  // unmount. A capture belongs to the chat it was started in; letting it ride
+  // into the next chat (or linger after the composer is gone) would be wrong,
+  // and a dangling mic track keeps the OS "recording" indicator lit. teardown
+  // reads refs so the (possibly stale) closure still sees the live recorder.
+  useEffect(() => {
+    return () => {
+      teardownRecording();
+      setRecording(false);
+      setRecordSeconds(0);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatId]);
+
   /** Kick off (or restart) the compress-then-upload pipeline for one pending item. */
   function startUpload(item: PendingAttachment) {
     const patch = (changes: Partial<PendingAttachment>) =>
@@ -416,6 +500,113 @@ export default function Composer({
     const files = Array.from(e.target.files ?? []);
     e.target.value = ''; // allow re-picking the same file later
     addFiles(files);
+  }
+
+  /** Stop and release the mic tracks (kills the OS "recording" indicator). */
+  function stopStream() {
+    const stream = streamRef.current;
+    if (stream) {
+      for (const track of stream.getTracks()) track.stop();
+      streamRef.current = null;
+    }
+  }
+
+  /** Halt the elapsed-time ticker. */
+  function clearRecordTimer() {
+    if (recordTimerRef.current !== null) {
+      clearInterval(recordTimerRef.current);
+      recordTimerRef.current = null;
+    }
+  }
+
+  /**
+   * Tear down any in-progress recording WITHOUT enqueuing a file — used on
+   * chat switch and unmount. Detaches the recorder's handlers first so its
+   * async `onstop` can't fire setState into a gone/!current component, then
+   * stops the mic and drops the buffered chunks.
+   */
+  function teardownRecording() {
+    const recorder = recorderRef.current;
+    if (recorder) {
+      recorder.ondataavailable = null;
+      recorder.onstop = null;
+      if (recorder.state !== 'inactive') {
+        try {
+          recorder.stop();
+        } catch {
+          // ignore — some browsers throw if already stopping
+        }
+      }
+      recorderRef.current = null;
+    }
+    stopStream();
+    chunksRef.current = [];
+    clearRecordTimer();
+  }
+
+  /** Begin recording a voice note (getUserMedia → MediaRecorder). */
+  async function startRecording() {
+    if (recording || recorderRef.current) return;
+    setSendError(null);
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch {
+      setSendError('Microphone access was denied');
+      return;
+    }
+    streamRef.current = stream;
+    recordCanceledRef.current = false;
+    chunksRef.current = [];
+
+    const mimeType = pickAudioMimeType();
+    const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+    recorderRef.current = recorder;
+    // Prefer the recorder's negotiated mime; fall back to what we asked for.
+    recordMimeRef.current = recorder.mimeType || mimeType || 'audio/webm';
+
+    recorder.ondataavailable = (e: BlobEvent) => {
+      if (e.data && e.data.size > 0) chunksRef.current.push(e.data);
+    };
+    recorder.onstop = () => {
+      const canceled = recordCanceledRef.current;
+      const chunks = chunksRef.current;
+      const baseMime = recordMimeRef.current.split(';')[0]!.trim().toLowerCase() || 'audio/webm';
+      const blob = new Blob(chunks, { type: baseMime });
+      recorderRef.current = null;
+      chunksRef.current = [];
+      stopStream();
+      clearRecordTimer();
+      setRecording(false);
+      if (canceled || blob.size === 0) return;
+      const file = new File([blob], `voice-${Date.now()}.${audioExtForMime(baseMime)}`, {
+        type: baseMime,
+      });
+      addFiles([file]);
+    };
+
+    recorder.start();
+    setRecording(true);
+    setRecordSeconds(0);
+    recordTimerRef.current = window.setInterval(() => setRecordSeconds((s) => s + 1), 1000);
+  }
+
+  /** Finish recording; the captured blob flows into the upload pipeline. */
+  function stopRecording() {
+    const recorder = recorderRef.current;
+    if (recorder && recorder.state !== 'inactive') recorder.stop();
+  }
+
+  /** Abort recording and discard the capture (nothing is enqueued). */
+  function cancelRecording() {
+    recordCanceledRef.current = true;
+    const recorder = recorderRef.current;
+    if (recorder && recorder.state !== 'inactive') {
+      recorder.stop(); // onstop sees `canceled` and drops the blob
+    } else {
+      teardownRecording();
+      setRecording(false);
+    }
   }
 
   /** Route pasted clipboard files (e.g. a screenshot) into the attachment pipeline. */
@@ -723,6 +914,37 @@ export default function Composer({
         </div>
       )}
 
+      {recording ? (
+        <div className="flex items-center gap-2" data-testid="recording-bar">
+          <span
+            className="flex h-2.5 w-2.5 flex-shrink-0 animate-pulse rounded-full bg-red-500"
+            aria-hidden="true"
+          />
+          <span
+            role="timer"
+            aria-label="Recording"
+            className="flex-1 text-sm font-medium text-gray-700 dark:text-gray-200"
+          >
+            Recording {formatDuration(recordSeconds)}
+          </span>
+          <button
+            type="button"
+            onClick={cancelRecording}
+            aria-label="Cancel recording"
+            className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full text-gray-500 transition-colors hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-700"
+          >
+            <CloseIcon />
+          </button>
+          <button
+            type="button"
+            onClick={stopRecording}
+            aria-label="Stop recording"
+            className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-[#0084ff] text-white transition-opacity"
+          >
+            <StopIcon />
+          </button>
+        </div>
+      ) : (
       <div className="flex items-end gap-2">
         {/* Attachments aren't editable, so the upload controls are hidden in edit mode. */}
         {!isEditing && (
@@ -744,6 +966,17 @@ export default function Composer({
             >
               <PaperclipIcon />
             </button>
+            {recordingSupported && (
+              <button
+                type="button"
+                onClick={() => void startRecording()}
+                disabled={disabled}
+                aria-label="Record voice message"
+                className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full text-gray-500 transition-colors hover:bg-gray-100 disabled:opacity-40 dark:text-gray-400 dark:hover:bg-gray-700"
+              >
+                <MicIcon />
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setHd((v) => !v)}
@@ -793,6 +1026,7 @@ export default function Composer({
           {isEditing ? <CheckIcon /> : <SendIcon />}
         </button>
       </div>
+      )}
     </form>
   );
 }

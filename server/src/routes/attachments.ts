@@ -39,31 +39,47 @@ const IMAGE_MIMES = new Set([
 const VIDEO_MIMES = new Set(['video/mp4', 'video/webm', 'video/quicktime']);
 
 /**
- * Extension → mime fallback for the inline-safe video types. Browsers derive a
- * file's type from the OS extension registry, and outside Apple platforms (or
- * for freshly re-downloaded files) a .mov commonly arrives as '' or
- * 'application/octet-stream' — which would wrongly demote it to a download
- * card. Only these known video extensions are ever upgraded; everything else
- * keeps whatever the browser said.
+ * Audio mimes the client renders inline (<audio>). These are the browser-safe
+ * formats voice notes record as — webm/opus (Chrome/Firefox) or mp4/AAC (iOS
+ * Safari, which can't record webm) — plus the common mpeg/ogg uploads. Any
+ * other audio/* stays kind 'file' (a download card), same as an unknown doc.
  */
-const VIDEO_EXT_MIMES: Record<string, string> = {
+const AUDIO_MIMES = new Set(['audio/webm', 'audio/mp4', 'audio/mpeg', 'audio/ogg']);
+
+/**
+ * Extension → mime fallback for the inline-safe video/audio types. Browsers
+ * derive a file's type from the OS extension registry, and outside Apple
+ * platforms (or for freshly re-downloaded files) a .mov commonly arrives as ''
+ * or 'application/octet-stream' — which would wrongly demote it to a download
+ * card. Only these known extensions are ever upgraded; everything else keeps
+ * whatever the browser said.
+ *
+ * NB: .webm is deliberately video-only here — a bare .webm is ambiguous
+ * (video/webm vs audio/webm) so it must never flip an octet-stream to audio;
+ * voice notes carry a real `audio/webm` mime and don't need the fallback.
+ */
+const EXT_MIMES: Record<string, string> = {
   '.mp4': 'video/mp4',
   '.m4v': 'video/mp4',
   '.webm': 'video/webm',
   '.mov': 'video/quicktime',
+  '.m4a': 'audio/mp4',
+  '.mp3': 'audio/mpeg',
+  '.ogg': 'audio/ogg',
+  '.oga': 'audio/ogg',
 };
 
 /**
  * Normalize the browser-reported mime (lowercase, parameters like `;codecs=`
  * stripped); when it's missing/generic, fall back to the filename extension
- * for the known video types. The result is what gets STORED — playback needs
- * a real video/* Content-Type, so kind alone wouldn't be enough.
+ * for the known video/audio types. The result is what gets STORED — playback
+ * needs a real media Content-Type, so kind alone wouldn't be enough.
  */
 function effectiveMimeType(reported: string, originalName: string): string {
   const normalized = (reported ?? '').split(';')[0]!.trim().toLowerCase();
   if (normalized === '' || normalized === 'application/octet-stream') {
     const ext = path.extname(originalName).toLowerCase();
-    return VIDEO_EXT_MIMES[ext] ?? normalized;
+    return EXT_MIMES[ext] ?? normalized;
   }
   return normalized;
 }
@@ -175,13 +191,15 @@ export function attachmentsRouter(db: Db, storage: Storage): Router {
         const originalName = path.basename(decoded).slice(0, 200) || 'file';
         const mimeType = effectiveMimeType(file.mimetype, originalName);
 
-        // Videos get no thumbnail/dimensions (sharp never runs on them) — just
-        // the kind tag so the client knows to render an inline <video>.
+        // Videos/audio get no thumbnail/dimensions (sharp never runs on them) —
+        // just the kind tag so the client renders an inline <video>/<audio>.
         let kind: AttachmentKind = IMAGE_MIMES.has(mimeType)
           ? 'image'
           : VIDEO_MIMES.has(mimeType)
             ? 'video'
-            : 'file';
+            : AUDIO_MIMES.has(mimeType)
+              ? 'audio'
+              : 'file';
         let width: number | null = null;
         let height: number | null = null;
         let thumbName: string | null = null;
@@ -271,11 +289,12 @@ export function attachmentsRouter(db: Db, storage: Storage): Router {
     // Thumb only exists for images; fall back to the full file when absent.
     const serveThumb = wantThumb && att.thumbPath !== null;
     const fileName = serveThumb ? att.thumbPath! : att.storagePath;
-    // Images and (the two safe) videos are served with their real mime so the
-    // browser renders them inline; anything else is an opaque download.
+    // Images and the browser-safe video/audio types are served with their real
+    // mime so the browser renders them inline; anything else is an opaque
+    // download.
     const contentType = serveThumb
       ? 'image/webp'
-      : kind === 'image' || kind === 'video'
+      : kind === 'image' || kind === 'video' || kind === 'audio'
         ? att.mimeType
         : 'application/octet-stream';
 

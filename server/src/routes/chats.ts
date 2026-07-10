@@ -47,6 +47,7 @@ const addMembersSchema = z.object({
 // Same rule as a group's name at creation (groupSchema).
 const renameSchema = z.object({ name: z.string().trim().min(1).max(100) });
 const markReadSchema = z.object({ messageId: z.number().int() });
+const muteSchema = z.object({ muted: z.boolean() });
 // Edits can't be attachment-only-empty: content is required, 1–4000 chars trimmed.
 const editSchema = z.object({
   content: z.string().trim().min(1).max(4000),
@@ -439,6 +440,31 @@ export function chatsRouter(db: Db, events: ChatEvents, storage: Storage): Route
         lastReadMessageId: parsed.data.messageId,
       });
     }
+    res.status(204).end();
+  });
+
+  // PUT /api/chats/:id/mute — set MY mute flag for this chat ({ muted: boolean }).
+  // Purely personal (like the read marker): no chat:updated is emitted, since a
+  // mute flag would leak into other members' personalized summaries if it were.
+  // Idempotent — setting the same value twice still 204s.
+  router.put('/:id/mute', requireAuth, (req, res) => {
+    const me = req.user!;
+    const chatId = parseId(req.params.id);
+    const chat = chatId === null ? undefined : getChatForMember(db, chatId, me.id);
+    if (!chat) {
+      res.status(404).json(CHAT_NOT_FOUND);
+      return;
+    }
+    const parsed = muteSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: firstIssue(parsed.error) });
+      return;
+    }
+
+    db.update(chatMembers)
+      .set({ muted: parsed.data.muted })
+      .where(and(eq(chatMembers.chatId, chat.id), eq(chatMembers.userId, me.id)))
+      .run();
     res.status(204).end();
   });
 

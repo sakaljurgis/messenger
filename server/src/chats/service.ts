@@ -535,9 +535,10 @@ function loadReplyTargets(db: Db, rows: MessageRow[]): Map<number, ReplyToDTO> {
 /**
  * Assembles the full DTO (sender + mentions + attachments + reactions + reply)
  * for a single message row, reusing the batch loaders. Used where one message's
- * live DTO is needed after a mutation (e.g. a reaction toggle).
+ * live DTO is needed after a mutation (e.g. a reaction toggle, or the
+ * link-preview subscriber persisting a fetched preview — see link-previews.ts).
  */
-function messageDTOFromRow(db: Db, message: MessageRow): MessageDTO {
+export function messageDTOFromRow(db: Db, message: MessageRow): MessageDTO {
   const sender = db.select().from(users).where(eq(users.id, message.senderId)).get()!;
   const mentions = loadMentions(db, [message.id]).get(message.id) ?? [];
   const attachmentDTOs = loadAttachments(db, [message.id]).get(message.id) ?? [];
@@ -642,6 +643,19 @@ function buildSummaries(
     unreadByChat.set(row.chatId, row.unread);
   }
 
+  // My own mute flag per chat (personalized, like unreadCount) — deliberately a
+  // separate query from membersByChat above so another member's mute state is
+  // never even loaded here, let alone exposed via toChatSummaryDTO.
+  const mutedByChat = new Map<number, boolean>();
+  const mutedRows = db
+    .select({ chatId: chatMembers.chatId, muted: chatMembers.muted })
+    .from(chatMembers)
+    .where(and(inArray(chatMembers.chatId, chatIds), eq(chatMembers.userId, userId)))
+    .all();
+  for (const row of mutedRows) {
+    mutedByChat.set(row.chatId, row.muted);
+  }
+
   for (const chat of chatRows) {
     summaries.set(
       chat.id,
@@ -650,6 +664,7 @@ function buildSummaries(
         membersByChat.get(chat.id) ?? [],
         lastMessageByChat.get(chat.id) ?? null,
         unreadByChat.get(chat.id) ?? 0,
+        mutedByChat.get(chat.id) ?? false,
       ),
     );
   }

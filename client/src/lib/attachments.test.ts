@@ -68,6 +68,12 @@ describe('shouldCompress', () => {
     expect(shouldCompress(fakeFile('a.mp4', 'video/mp4', 2 * MB))).toBe(false);
     expect(shouldCompress(fakeFile('a.webm', 'video/webm', 2 * MB))).toBe(false);
   });
+
+  it('skips audio / voice notes (uploaded as-is, never re-encoded client-side)', () => {
+    expect(shouldCompress(fakeFile('voice.webm', 'audio/webm', 2 * MB))).toBe(false);
+    expect(shouldCompress(fakeFile('voice.m4a', 'audio/mp4', 2 * MB))).toBe(false);
+    expect(shouldCompress(fakeFile('song.mp3', 'audio/mpeg', 2 * MB))).toBe(false);
+  });
 });
 
 describe('compressImage', () => {

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { AttachmentDTO, MessageDTO, UserDTO } from '@messenger/shared';
 import Composer from './Composer';
@@ -433,6 +433,170 @@ describe('Composer attachments', () => {
 
     rerender(<Composer {...props} chatId={20} />);
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+});
+
+describe('Composer voice recording', () => {
+  // jsdom has neither getUserMedia nor MediaRecorder — stub both. Each stubbed
+  // recorder captures the handlers the composer attaches; calling stop() flushes
+  // one data chunk then fires onstop, mirroring a real recorder.
+  class MockMediaRecorder {
+    static instances: MockMediaRecorder[] = [];
+    static isTypeSupported = (t: string) => t === 'audio/webm;codecs=opus';
+    ondataavailable: ((e: { data: Blob }) => void) | null = null;
+    onstop: (() => void) | null = null;
+    state: 'inactive' | 'recording' = 'inactive';
+    mimeType: string;
+    constructor(_stream: MediaStream, options?: { mimeType?: string }) {
+      this.mimeType = options?.mimeType ?? 'audio/webm';
+      MockMediaRecorder.instances.push(this);
+    }
+    start() {
+      this.state = 'recording';
+    }
+    stop() {
+      if (this.state === 'inactive') return;
+      this.state = 'inactive';
+      this.ondataavailable?.({ data: new Blob(['voice-bytes'], { type: this.mimeType }) });
+      this.onstop?.();
+    }
+  }
+
+  function installMediaStubs({ deny = false } = {}) {
+    const track = { stop: vi.fn() };
+    const stream = { getTracks: () => [track] } as unknown as MediaStream;
+    const getUserMedia = deny
+      ? vi.fn().mockRejectedValue(new DOMException('denied', 'NotAllowedError'))
+      : vi.fn().mockResolvedValue(stream);
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: { getUserMedia },
+      configurable: true,
+    });
+    MockMediaRecorder.instances = [];
+    vi.stubGlobal('MediaRecorder', MockMediaRecorder as unknown as typeof MediaRecorder);
+    return { track, getUserMedia };
+  }
+
+  beforeEach(() => {
+    (uploadAttachment as Mock).mockResolvedValue(dto);
+    (compressImage as Mock).mockImplementation(async (f: File) => f);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    delete (navigator as unknown as { mediaDevices?: unknown }).mediaDevices;
+    vi.clearAllMocks();
+  });
+
+  it('hides the mic button when recording is unsupported (no MediaRecorder/getUserMedia)', () => {
+    render(<Composer onSend={vi.fn()} members={[me]} meId={me.id} chatId={10} />);
+    expect(screen.queryByRole('button', { name: /record voice message/i })).not.toBeInTheDocument();
+  });
+
+  it('hides the mic button in edit mode (like attachments)', () => {
+    installMediaStubs();
+    const editing: MessageDTO = {
+      id: 5,
+      chatId: 10,
+      sender: me,
+      content: 'edit me',
+      mentions: [],
+      attachments: [],
+      reactions: [],
+      replyTo: null,
+      createdAt: new Date(1_700_000_000_000).toISOString(),
+      editedAt: null,
+      isDeleted: false,
+    };
+    render(
+      <Composer
+        onSend={vi.fn()}
+        members={[me]}
+        meId={me.id}
+        chatId={10}
+        editing={editing}
+        onEditSubmit={vi.fn()}
+        onCancelEdit={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole('button', { name: /record voice message/i })).not.toBeInTheDocument();
+  });
+
+  it('records, then the captured blob enters the pending flow with a voice-*.webm audio file', async () => {
+    installMediaStubs();
+    const onSend = vi.fn();
+    render(<Composer onSend={onSend} members={[me]} meId={me.id} chatId={10} />);
+
+    // Start: the recording bar with its elapsed-time label replaces the input row.
+    await userEvent.click(screen.getByRole('button', { name: /record voice message/i }));
+    const bar = await screen.findByTestId('recording-bar');
+    expect(within(bar).getByRole('timer')).toHaveTextContent('Recording 0:00');
+
+    // Stop finalizes: the blob is wrapped and uploaded through the normal pipeline.
+    await userEvent.click(screen.getByRole('button', { name: /stop recording/i }));
+    await waitFor(() => expect(uploadAttachment).toHaveBeenCalledTimes(1));
+
+    const [chatArg, fileArg] = (uploadAttachment as Mock).mock.calls[0]!;
+    expect(chatArg).toBe(10);
+    expect(fileArg).toBeInstanceOf(File);
+    expect((fileArg as File).name).toMatch(/^voice-\d+\.webm$/);
+    expect((fileArg as File).type).toBe('audio/webm');
+    // Voice notes are never image-compressed.
+    expect(compressImage).not.toHaveBeenCalled();
+
+    // The pending strip shows the file chip and the recording bar is gone.
+    expect(screen.getByLabelText('Attachments to send')).toBeInTheDocument();
+    expect(screen.queryByTestId('recording-bar')).not.toBeInTheDocument();
+
+    // Sending carries the uploaded audio attachment id.
+    await waitFor(() => expect(screen.getByRole('button', { name: /send/i })).not.toBeDisabled());
+    await userEvent.click(screen.getByRole('button', { name: /send/i }));
+    expect(onSend).toHaveBeenCalledWith('', [], [dto.id], undefined);
+  });
+
+  it('cancel discards the capture, stops the mic tracks, and enqueues nothing', async () => {
+    const { track } = installMediaStubs();
+    render(<Composer onSend={vi.fn()} members={[me]} meId={me.id} chatId={10} />);
+
+    await userEvent.click(screen.getByRole('button', { name: /record voice message/i }));
+    await screen.findByTestId('recording-bar');
+
+    await userEvent.click(screen.getByRole('button', { name: /cancel recording/i }));
+
+    // No upload, bar dismissed, and the mic track was released.
+    expect(uploadAttachment).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('recording-bar')).not.toBeInTheDocument();
+    expect(track.stop).toHaveBeenCalledTimes(1);
+    expect(screen.queryByLabelText('Attachments to send')).not.toBeInTheDocument();
+  });
+
+  it('shows a dismissible error when microphone permission is denied', async () => {
+    installMediaStubs({ deny: true });
+    render(<Composer onSend={vi.fn()} members={[me]} meId={me.id} chatId={10} />);
+
+    await userEvent.click(screen.getByRole('button', { name: /record voice message/i }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/microphone access was denied/i);
+    // The recorder never started, so no recording bar.
+    expect(screen.queryByTestId('recording-bar')).not.toBeInTheDocument();
+  });
+
+  it('cancels an in-progress recording and releases the mic when the chat switches', async () => {
+    const { track } = installMediaStubs();
+    const props = { onSend: vi.fn(), members: [me], meId: me.id };
+    const { rerender } = render(<Composer {...props} chatId={10} />);
+
+    await userEvent.click(screen.getByRole('button', { name: /record voice message/i }));
+    await screen.findByTestId('recording-bar');
+
+    rerender(<Composer {...props} chatId={20} />);
+
+    // The capture is abandoned, the bar is gone, the mic is freed, and nothing
+    // rode into the new chat.
+    expect(screen.queryByTestId('recording-bar')).not.toBeInTheDocument();
+    expect(track.stop).toHaveBeenCalledTimes(1);
+    expect(uploadAttachment).not.toHaveBeenCalled();
+    expect(screen.queryByLabelText('Attachments to send')).not.toBeInTheDocument();
   });
 });
 

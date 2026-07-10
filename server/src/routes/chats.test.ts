@@ -566,6 +566,77 @@ describe('PATCH /api/chats/:id — rename', () => {
   });
 });
 
+describe('PUT /api/chats/:id/mute', () => {
+  let app: App;
+  let alice: Actor;
+  let bob: Actor;
+  let dm: number;
+  beforeEach(async () => {
+    app = makeApp();
+    alice = await register(app, 'alice@example.com', 'Alice');
+    bob = await register(app, 'bob@example.com', 'Bob');
+    dm = (await alice.agent.post('/api/chats').send({ userId: bob.user.id })).body.chat
+      .id as number;
+  });
+
+  it('mutes for the caller only (204), persisted across GET /api/chats', async () => {
+    const res = await alice.agent.put(`/api/chats/${dm}/mute`).send({ muted: true });
+    expect(res.status).toBe(204);
+
+    // Alice's own summary reflects it; Bob's own view of the same chat does not.
+    expect((await summary(alice, dm)).muted).toBe(true);
+    expect((await summary(bob, dm)).muted).toBeFalsy();
+
+    const list = (await alice.agent.get('/api/chats')).body.chats as ChatSummaryDTO[];
+    expect(list.find((c) => c.id === dm)!.muted).toBe(true);
+  });
+
+  it('unmutes (204) and is idempotent — repeating the same value still 204s', async () => {
+    await alice.agent.put(`/api/chats/${dm}/mute`).send({ muted: true });
+    const off = await alice.agent.put(`/api/chats/${dm}/mute`).send({ muted: false });
+    expect(off.status).toBe(204);
+    expect((await summary(alice, dm)).muted).toBe(false);
+
+    const repeat = await alice.agent.put(`/api/chats/${dm}/mute`).send({ muted: false });
+    expect(repeat.status).toBe(204);
+    expect((await summary(alice, dm)).muted).toBe(false);
+  });
+
+  it('rejects a non-boolean/missing muted field with 400', async () => {
+    expect((await alice.agent.put(`/api/chats/${dm}/mute`).send({ muted: 'yes' })).status).toBe(
+      400,
+    );
+    expect((await alice.agent.put(`/api/chats/${dm}/mute`).send({})).status).toBe(400);
+  });
+
+  it('hides the chat from non-members (404, no existence leak)', async () => {
+    const carol = await register(app, 'carol@example.com', 'Carol');
+    const res = await carol.agent.put(`/api/chats/${dm}/mute`).send({ muted: true });
+    expect(res.status).toBe(404);
+  });
+
+  it('404s for an unknown chat id', async () => {
+    const res = await alice.agent.put('/api/chats/999999/mute').send({ muted: true });
+    expect(res.status).toBe(404);
+  });
+
+  it('survives unrelated message traffic (no accidental reset)', async () => {
+    await alice.agent.put(`/api/chats/${dm}/mute`).send({ muted: true });
+    await send(bob, dm, 'hello');
+    const reply = await send(alice, dm, 'hi back');
+    await alice.agent
+      .post(`/api/chats/${dm}/read`)
+      .send({ messageId: reply.body.message.id });
+
+    expect((await summary(alice, dm)).muted).toBe(true);
+  });
+
+  it('requires authentication', async () => {
+    const res = await request(app).put(`/api/chats/${dm}/mute`).send({ muted: true });
+    expect(res.status).toBe(401);
+  });
+});
+
 describe('POST /api/chats/:id/leave', () => {
   let app: App;
   let events: ChatEvents;

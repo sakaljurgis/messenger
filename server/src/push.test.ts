@@ -242,3 +242,110 @@ describe('push fan-out', () => {
     expect(subsFor(db, carol.user.id)).toHaveLength(1);
   });
 });
+
+describe('push fan-out — mute', () => {
+  let db: Db;
+  let events: ChatEvents;
+  let app: App;
+  let alice: Actor;
+  let bob: Actor;
+  let carol: Actor;
+  let groupId: number;
+  const connected = new Set<number>();
+  const send = vi.fn<typeof import('web-push').sendNotification>();
+  let handle: ReturnType<typeof initPush>;
+
+  const savedPub = process.env.VAPID_PUBLIC_KEY;
+  const savedPriv = process.env.VAPID_PRIVATE_KEY;
+
+  beforeEach(async () => {
+    process.env.VAPID_PUBLIC_KEY = 'test-public';
+    process.env.VAPID_PRIVATE_KEY = 'test-private';
+
+    db = createDb(':memory:');
+    events = createChatEvents();
+    app = createApp(db, events);
+    connected.clear();
+    send.mockReset();
+    send.mockResolvedValue({ statusCode: 201, body: '', headers: {} });
+    handle = initPush(db, events, (id) => connected.has(id), send);
+
+    alice = await register(app, 'alice@example.com', 'Alice');
+    bob = await register(app, 'bob@example.com', 'Bob');
+    carol = await register(app, 'carol@example.com', 'Carol');
+
+    groupId = (
+      await alice.agent
+        .post('/api/chats')
+        .send({ name: 'Team', memberIds: [bob.user.id, carol.user.id] })
+    ).body.chat.id as number;
+
+    // Bob and Carol are both offline and subscribed — the baseline recipient
+    // set before any mute filtering is applied.
+    db.insert(pushSubscriptions)
+      .values([
+        { userId: bob.user.id, endpoint: 'https://push.example.com/bob', p256dh: 'pb', auth: 'ab' },
+        { userId: carol.user.id, endpoint: 'https://push.example.com/carol', p256dh: 'pc', auth: 'ac' },
+      ])
+      .run();
+  });
+
+  afterEach(() => {
+    if (savedPub === undefined) delete process.env.VAPID_PUBLIC_KEY;
+    else process.env.VAPID_PUBLIC_KEY = savedPub;
+    if (savedPriv === undefined) delete process.env.VAPID_PRIVATE_KEY;
+    else process.env.VAPID_PRIVATE_KEY = savedPriv;
+  });
+
+  it('skips a muted member but still delivers to an unmuted one', async () => {
+    expect((await bob.agent.put(`/api/chats/${groupId}/mute`).send({ muted: true })).status).toBe(
+      204,
+    );
+
+    await alice.agent.post(`/api/chats/${groupId}/messages`).send({ content: 'hey team' });
+    await handle.lastDispatch;
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls[0]![0]!.endpoint).toBe('https://push.example.com/carol');
+  });
+
+  it('skips a muted member even when @mentioned — a mute is a mute', async () => {
+    await bob.agent.put(`/api/chats/${groupId}/mute`).send({ muted: true });
+
+    await alice.agent
+      .post(`/api/chats/${groupId}/messages`)
+      .send({ content: 'hey @bob', mentions: [bob.user.id] });
+    await handle.lastDispatch;
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls[0]![0]!.endpoint).toBe('https://push.example.com/carol');
+  });
+
+  it('does not affect the socket relay or unread count for the muted member', async () => {
+    await bob.agent.put(`/api/chats/${groupId}/mute`).send({ muted: true });
+
+    await alice.agent.post(`/api/chats/${groupId}/messages`).send({ content: 'hey team' });
+    await handle.lastDispatch;
+
+    const bobSummary = (await bob.agent.get(`/api/chats/${groupId}`)).body.chat as {
+      unreadCount: number;
+    };
+    expect(bobSummary.unreadCount).toBe(1);
+  });
+
+  it('resumes delivery after unmuting (mute state survives intervening traffic)', async () => {
+    await bob.agent.put(`/api/chats/${groupId}/mute`).send({ muted: true });
+    await alice.agent.post(`/api/chats/${groupId}/messages`).send({ content: 'while muted' });
+    await handle.lastDispatch;
+    expect(send).toHaveBeenCalledTimes(1); // only Carol
+
+    send.mockClear();
+    await bob.agent.put(`/api/chats/${groupId}/mute`).send({ muted: false });
+
+    await alice.agent.post(`/api/chats/${groupId}/messages`).send({ content: 'unmuted now' });
+    await handle.lastDispatch;
+
+    const endpoints = send.mock.calls.map(([sub]) => sub.endpoint).sort();
+    expect(endpoints).toEqual(['https://push.example.com/bob', 'https://push.example.com/carol']);
+  });
+});

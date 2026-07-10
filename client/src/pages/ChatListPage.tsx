@@ -105,6 +105,28 @@ function GroupIcon() {
   );
 }
 
+/** Bell-with-slash glyph marking a muted chat row. */
+function BellOffIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      aria-hidden="true"
+    >
+      <path strokeLinecap="round" strokeLinejoin="round" d="M2 2l20 20" />
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M18.63 13A17.89 17.89 0 0 1 18 8a6 6 0 0 0-9.33-5M6.26 6.26A5.86 5.86 0 0 0 6 8c0 7-3 9-3 9h14"
+      />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M13.73 21a2 2 0 0 1-3.46 0" />
+    </svg>
+  );
+}
+
 function SearchIcon() {
   return (
     <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
@@ -210,6 +232,7 @@ function ChatRow({
 }) {
   const title = chatTitle(chat, meId);
   const unread = chat.unreadCount > 0;
+  const muted = chat.muted ?? false;
   // A DM's avatar belongs to the other member — or to ME for a notes-to-self
   // DM (I'm its only member), so my picked color shows there too.
   const dmPeer = otherMember(chat, meId) ?? chat.members.find((m) => m.id === meId);
@@ -253,6 +276,15 @@ function ChatRow({
                   <span className="text-xs">{chat.members.length}</span>
                 </span>
               )}
+              {muted && (
+                <span
+                  className="flex-shrink-0 text-gray-400 dark:text-gray-500"
+                  aria-label="Muted"
+                  title="Muted"
+                >
+                  <BellOffIcon />
+                </span>
+              )}
             </span>
             {chat.lastMessage && (
               <span className="flex-shrink-0 text-xs text-gray-400 dark:text-gray-500">
@@ -265,7 +297,11 @@ function ChatRow({
               {typing ? 'typing…' : previewText(chat, meId)}
             </span>
             {unread && (
-              <span className="flex h-5 min-w-5 flex-shrink-0 items-center justify-center rounded-full bg-[#0084ff] px-1.5 text-xs font-semibold text-white">
+              <span
+                className={`flex h-5 min-w-5 flex-shrink-0 items-center justify-center rounded-full px-1.5 text-xs font-semibold text-white ${
+                  muted ? 'bg-gray-400 dark:bg-gray-600' : 'bg-[#0084ff]'
+                }`}
+              >
                 {chat.unreadCount}
               </span>
             )}

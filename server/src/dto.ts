@@ -2,6 +2,7 @@ import type {
   AttachmentDTO,
   ChatMemberDTO,
   ChatSummaryDTO,
+  LinkPreviewDTO,
   MessageDTO,
   ReactionGroupDTO,
   ReplyToDTO,
@@ -64,14 +65,34 @@ export function toAttachmentDTO(attachment: AttachmentRow): AttachmentDTO {
 }
 
 /**
+ * Parses the raw `messages.link_preview` JSON column into a
+ * {@link LinkPreviewDTO}. Never throws: `null` column, malformed JSON, or a
+ * value that doesn't even look like an object all collapse to `null` — a
+ * link preview is a nice-to-have, so a parse failure must never break message
+ * serialization.
+ */
+function parseLinkPreview(raw: string | null): LinkPreviewDTO | null {
+  if (raw === null) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return parsed !== null && typeof parsed === 'object' ? (parsed as LinkPreviewDTO) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Maps a message row (+ its resolved sender, mention user ids and attachments)
  * to the API shape. `createdAt` is a Date from the drizzle timestamp column →
  * ISO string over the wire. `attachments` defaults to empty for plain messages.
  *
  * Deleted messages serialize as a tombstone: the original text, mentions,
- * attachments, reactions and reply reference are dropped (`content: ''`, all
- * lists empty, `replyTo: null`, `editedAt: null`) so a deleted message can never
- * leak its former contents. `replyTo`, when present, is the target's snapshot.
+ * attachments, reactions, reply reference and link preview are dropped
+ * (`content: ''`, all lists empty, `replyTo: null`, `linkPreview: null`,
+ * `editedAt: null`) so a deleted message can never leak its former contents —
+ * even though the underlying `link_preview` column, like `content`, is left
+ * untouched by the soft-delete itself (see chats/service#deleteMessage).
+ * `replyTo`, when present, is the target's snapshot.
  */
 export function toMessageDTO(
   message: MessageRow,
@@ -92,6 +113,7 @@ export function toMessageDTO(
     reactions: isDeleted ? [] : reactions,
     replyTo: isDeleted ? null : replyTo,
     createdAt: message.createdAt.toISOString(),
+    linkPreview: isDeleted ? null : parseLinkPreview(message.linkPreview),
     editedAt: isDeleted || message.editedAt === null ? null : message.editedAt.toISOString(),
     isDeleted,
   };
@@ -112,14 +134,16 @@ export function toChatMemberDTO(member: ChatMemberRow): ChatMemberDTO {
  * Assembles a chat summary personalized for the requesting user. `members` are all
  * members (incl. the requester), each carrying their own `lastReadMessageId` (this
  * is what powers read-receipt rendering — everyone's read position, not just the
- * requester's); `lastMessage`/`unreadCount` are precomputed by the chats service to
- * keep this mapper pure.
+ * requester's); `lastMessage`/`unreadCount`/`muted` are precomputed by the chats
+ * service to keep this mapper pure. `muted` is the REQUESTER's own mute flag only
+ * (like `unreadCount`) — another member's mute state is never exposed here.
  */
 export function toChatSummaryDTO(
   chat: ChatRow,
   members: ChatMemberRow[],
   lastMessage: MessageDTO | null,
   unreadCount: number,
+  muted: boolean,
 ): ChatSummaryDTO {
   return {
     id: chat.id,
@@ -128,5 +152,6 @@ export function toChatSummaryDTO(
     members: members.map(toChatMemberDTO),
     lastMessage,
     unreadCount,
+    muted,
   };
 }

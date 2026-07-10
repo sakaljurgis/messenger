@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import type { AttachmentDTO, ChatMemberDTO, ChatSummaryDTO, MessageDTO, UserDTO } from '@messenger/shared';
@@ -182,6 +182,27 @@ describe('ChatListPage', () => {
     expect(badges[0]).toHaveTextContent('3');
     // Hovering the badge lists everyone in the group.
     expect(badges[0]).toHaveAttribute('title', 'Me, Bob, Carol');
+  });
+
+  it('shows a Muted indicator and grays out the unread badge on a muted chat', async () => {
+    const mutedDm: ChatSummaryDTO = {
+      id: 10, type: 'dm', name: null, members: [me, bob], lastMessage: msg(5, bob, 'Hey there'),
+      unreadCount: 2, muted: true,
+    };
+    stubFetch([mutedDm, chats[1]!]);
+    renderChatList();
+    await screen.findByText('Bob');
+
+    // The muted row shows the indicator and a gray (not blue) unread badge.
+    const bobRow = screen.getByText('Bob').closest('a') as HTMLElement;
+    expect(within(bobRow).getByLabelText('Muted')).toBeInTheDocument();
+    const badge = within(bobRow).getByText('2');
+    expect(badge.className).toMatch(/bg-gray-400/);
+    expect(badge.className).not.toMatch(/bg-\[#0084ff\]/);
+
+    // The unmuted group row has neither.
+    const teamRow = screen.getByText('Team').closest('a') as HTMLElement;
+    expect(within(teamRow).queryByLabelText('Muted')).not.toBeInTheDocument();
   });
 
   it('previews a message-less group with its member names', async () => {

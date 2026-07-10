@@ -1,8 +1,8 @@
 import webpush from 'web-push';
-import { eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import type { MessageDTO } from '@messenger/shared';
 import type { Db } from './db/index.js';
-import { pushSubscriptions, type ChatRow } from './db/schema.js';
+import { chatMembers, pushSubscriptions, type ChatRow } from './db/schema.js';
 import type { ChatEvents } from './events.js';
 
 /**
@@ -128,9 +128,29 @@ export function initPush(
 
   async function dispatch(message: MessageDTO, chat: ChatRow, memberIds: number[]): Promise<void> {
     // Notify every member who isn't the sender and has no live socket.
-    const recipients = memberIds.filter(
+    const candidates = memberIds.filter(
       (id) => id !== message.sender.id && !isUserConnected(id),
     );
+    if (candidates.length === 0) return;
+
+    // Drop anyone who's muted this chat — deliberately including @mentions: a
+    // mute is a mute, not a "mute except when mentioned" (sockets, unread counts
+    // and webhook bots are untouched; this filter is push-only, see schema.ts).
+    const mutedIds = new Set(
+      db
+        .select({ userId: chatMembers.userId })
+        .from(chatMembers)
+        .where(
+          and(
+            eq(chatMembers.chatId, chat.id),
+            inArray(chatMembers.userId, candidates),
+            eq(chatMembers.muted, true),
+          ),
+        )
+        .all()
+        .map((r) => r.userId),
+    );
+    const recipients = candidates.filter((id) => !mutedIds.has(id));
     if (recipients.length === 0) return;
 
     const subs = db

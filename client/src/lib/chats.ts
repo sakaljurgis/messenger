@@ -19,7 +19,7 @@ import type {
   ServerToClientEvents,
   UserDTO,
 } from '@messenger/shared';
-import { apiDelete, apiGet, apiPatch, apiPost } from './api';
+import { ApiError, apiDelete, apiGet, apiPatch, apiPost } from './api';
 import { getSocket } from './socket';
 
 const PAGE_LIMIT = 30;
@@ -329,6 +329,106 @@ function errorMessage(err: unknown, fallback: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Offline outbox — a persistent queue for text sends made while offline.
+// ---------------------------------------------------------------------------
+
+/**
+ * A text-only message queued locally because the send couldn't reach the server
+ * (the browser was offline, or the POST failed with a network error). Persisted
+ * to localStorage so it survives a reload, and flushed IN ORDER once we're back
+ * online. This is deliberately NOT a MessageDTO — it has no server id; it renders
+ * as an optimistic 'sending'/'failed' bubble until its real message arrives via
+ * the eventual POST response (and merges through {@link mergeMessages} like any
+ * normal send).
+ *
+ * NB: only text sends are queued. A send WITH attachments is never queued — the
+ * files are uploaded to the server BEFORE the send, so an offline attachment send
+ * can't happen; those keep the original POST-and-throw failure path (see
+ * {@link UseMessagesResult.sendMessage}). Multi-tab is best-effort: each tab keeps
+ * its own in-memory view of the queue and there is no `storage`-event sync, so a
+ * flush in one tab won't live-update another's optimistic bubbles (they reconcile
+ * on the next focus/reconnect refetch). Single-tab — the intended use — is exact.
+ */
+export interface OutboxItem {
+  /** Client-generated stable key: the React key + identity for retry/discard/flush. */
+  tempKey: string;
+  content: string;
+  mentions: number[];
+  /** Reply target id, snapshotted at queue time (may be stale by flush time). */
+  replyToId?: number;
+  /** ISO timestamp the item was queued. */
+  createdAt: string;
+  /** 'sending' = pending/flushing; 'failed' = a flush hit an HTTP error (4xx/5xx). */
+  status: 'sending' | 'failed';
+}
+
+const OUTBOX_KEY_PREFIX = 'outbox:chat:';
+
+/** localStorage key holding a chat's outbox queue. */
+export function outboxStorageKey(chatId: number): string {
+  return `${OUTBOX_KEY_PREFIX}${chatId}`;
+}
+
+/** A fresh, collision-resistant temp key for a queued item. */
+export function makeOutboxTempKey(): string {
+  return `outbox-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function isOutboxItem(value: unknown): value is OutboxItem {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.tempKey === 'string' &&
+    typeof v.content === 'string' &&
+    Array.isArray(v.mentions) &&
+    typeof v.createdAt === 'string' &&
+    (v.status === 'sending' || v.status === 'failed')
+  );
+}
+
+/** Read a chat's persisted outbox (empty on a missing/corrupt/unavailable store). */
+export function loadOutbox(chatId: number): OutboxItem[] {
+  try {
+    const raw = localStorage.getItem(outboxStorageKey(chatId));
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(isOutboxItem);
+  } catch {
+    return [];
+  }
+}
+
+/** Persist a chat's outbox; an empty queue removes the key. Storage errors
+ *  (private mode, quota) are swallowed — a lost outbox must never break sending. */
+export function saveOutbox(chatId: number, items: OutboxItem[]): void {
+  try {
+    if (items.length === 0) localStorage.removeItem(outboxStorageKey(chatId));
+    else localStorage.setItem(outboxStorageKey(chatId), JSON.stringify(items));
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * True when `err` is a network-level failure rather than an HTTP error response.
+ * `fetch` rejects with a TypeError when it can't reach the server (offline, DNS,
+ * connection refused); our `api` wrapper instead throws an {@link ApiError} for
+ * any 4xx/5xx. So an offline send is exactly a non-ApiError TypeError — those get
+ * queued, whereas an ApiError keeps today's error-banner + composer-restore path.
+ */
+export function isNetworkError(err: unknown): boolean {
+  return err instanceof TypeError && !(err instanceof ApiError);
+}
+
+/** POST a text/attachment message and resolve to the server's created DTO. */
+function postMessage(chatId: number, body: SendMessageRequest): Promise<MessageDTO> {
+  return apiPost<{ message: MessageDTO }>(`/api/chats/${chatId}/messages`, body).then(
+    (res) => res.message,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Live-update primitives — Socket.IO subscriptions + gap recovery.
 // ---------------------------------------------------------------------------
 
@@ -518,16 +618,33 @@ export interface UseMessagesResult {
   /** Count of others' `message:new` events suppressed while away from the live
    *  edge — surfaced for the jump-to-bottom "N new" pill. Resets on reaching it. */
   newWhileWindowed: number;
+  /**
+   * Send a text (or attachment) message. Resolves to the created DTO on a normal
+   * send, or `null` when the send was QUEUED to the offline outbox instead (the
+   * browser was offline, or a text-only POST failed with a network error) — a
+   * resolved promise, so the composer clears as "sent". A real HTTP error
+   * (ApiError) still rejects, keeping the error-banner + composer-restore path.
+   */
   sendMessage: (
     content: string,
     mentions?: number[],
     attachmentIds?: number[],
     replyToId?: number,
-  ) => Promise<MessageDTO>;
+  ) => Promise<MessageDTO | null>;
   editMessage: (messageId: number, content: string, mentions?: number[]) => Promise<MessageDTO>;
   deleteMessage: (messageId: number) => Promise<void>;
   /** Toggle my emoji reaction on a message; updates local state in place. */
   toggleReaction: (messageId: number, emoji: string) => Promise<MessageDTO>;
+  /**
+   * Text sends queued locally while offline, oldest first — rendered as optimistic
+   * 'sending'/'failed' bubbles after the real messages (live edge only; hidden in
+   * windowed mode). Empty unless something is queued.
+   */
+  outbox: OutboxItem[];
+  /** Re-queue a failed item and kick a flush (tap-to-retry on a failed bubble). */
+  retryOutbox: (tempKey: string) => void;
+  /** Drop a queued/failed item without sending (the ✕ on a failed bubble). */
+  discardOutbox: (tempKey: string) => void;
   loading: boolean;
   error: string | null;
 }
@@ -569,7 +686,26 @@ export function useMessages(chatId: number, options: UseMessagesOptions = {}): U
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Offline outbox: text sends queued when the network is unreachable, persisted
+  // per-chat in localStorage. `outbox` drives rendering; `outboxRef` gives the
+  // async flush loop a synchronous, always-current view (state lags across awaits).
+  const [outbox, setOutbox] = useState<OutboxItem[]>([]);
+  const outboxRef = useRef<OutboxItem[]>([]);
+  const flushingRef = useRef(false);
+
   const atLiveEdge = newerCursor === null;
+
+  // Update outbox state, the sync ref, and localStorage together. Takes a
+  // functional updater over the LATEST queue (the ref) so rapid updates compose.
+  const commitOutbox = useCallback(
+    (updater: (prev: OutboxItem[]) => OutboxItem[]) => {
+      const next = updater(outboxRef.current);
+      outboxRef.current = next;
+      setOutbox(next);
+      saveOutbox(chatId, next);
+    },
+    [chatId],
+  );
 
   // Reset + initial fetch whenever the chat OR the focus target changes. A
   // target message id fetches a centred window (`?around=`); otherwise the
@@ -606,6 +742,15 @@ export function useMessages(chatId: number, options: UseMessagesOptions = {}): U
       cancelled = true;
     };
   }, [chatId, targetMessageId]);
+
+  // Load the persisted outbox for this chat (survives reload). Keyed on chatId
+  // only (not the focus target) so entering/leaving windowed mode never drops the
+  // queue. Declared before the flush-trigger effect so the ref is primed first.
+  useEffect(() => {
+    const loaded = loadOutbox(chatId);
+    outboxRef.current = loaded;
+    setOutbox(loaded);
+  }, [chatId]);
 
   // Live: a message pushed for THIS chat. At the live edge, merge it (dedupes by
   // id, so the echo of our own just-sent message collapses onto the optimistic
@@ -668,22 +813,139 @@ export function useMessages(chatId: number, options: UseMessagesOptions = {}): U
     if (nextNewer === null) setNewWhileWindowed(0);
   }, [chatId, newerCursor]);
 
+  // Append a text send to the outbox (offline path). No attachments — those
+  // never queue (see OutboxItem / sendMessage docs).
+  const enqueue = useCallback(
+    (content: string, mentions: number[], replyToId?: number) => {
+      const item: OutboxItem = {
+        tempKey: makeOutboxTempKey(),
+        content,
+        mentions,
+        createdAt: new Date().toISOString(),
+        status: 'sending',
+        ...(replyToId ? { replyToId } : {}),
+      };
+      commitOutbox((prev) => [...prev, item]);
+    },
+    [commitOutbox],
+  );
+
+  // Flush queued sends in order, oldest first. Guarded against re-entry and
+  // skipped entirely while offline. Per pending item:
+  //  - success → drop it and merge the real message (exactly like a live send);
+  //  - network error → we're offline again: STOP, leaving this + the rest queued;
+  //  - HTTP 4xx/5xx (e.g. a now-deleted reply target → 400) → mark it 'failed'
+  //    and keep going. A failed item stays put with retry/discard affordances and
+  //    is not re-attempted until retried.
+  // Known duplicate-risk window: if a send succeeded but its response was lost we
+  // re-send on the next flush — there is no idempotency key in the contract.
+  // Accepted for a personal app.
+  const flush = useCallback(async () => {
+    if (flushingRef.current) return;
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+    flushingRef.current = true;
+    try {
+      for (const snapshot of [...outboxRef.current]) {
+        // Re-read from the live ref: the item may have been removed/failed since.
+        const item = outboxRef.current.find((i) => i.tempKey === snapshot.tempKey);
+        if (!item || item.status !== 'sending') continue;
+        const body: SendMessageRequest = { content: item.content };
+        if (item.mentions.length > 0) body.mentions = item.mentions;
+        if (item.replyToId) body.replyToId = item.replyToId;
+        try {
+          const message = await postMessage(chatId, body);
+          commitOutbox((prev) => prev.filter((i) => i.tempKey !== item.tempKey));
+          setMessages((prev) => mergeMessages(prev, [message]));
+        } catch (err) {
+          if (isNetworkError(err)) break;
+          commitOutbox((prev) =>
+            prev.map((i) => (i.tempKey === item.tempKey ? { ...i, status: 'failed' } : i)),
+          );
+        }
+      }
+    } finally {
+      flushingRef.current = false;
+    }
+  }, [chatId, commitOutbox]);
+
+  // Flush on socket (re)connect, when the browser fires 'online', and on chat
+  // load if we're already online. `flush` self-gates on navigator.onLine, so the
+  // eager mount call is a safe no-op while offline. Latest closure via ref.
+  const flushRef = useRef(flush);
+  flushRef.current = flush;
+  useEffect(() => {
+    const run = () => void flushRef.current();
+    const socket = getSocket();
+    socket.on('connect', run);
+    window.addEventListener('online', run);
+    run();
+    return () => {
+      socket.off('connect', run);
+      window.removeEventListener('online', run);
+    };
+  }, [chatId]);
+
   const sendMessage = useCallback(
     async (
       content: string,
       mentions?: number[],
       attachmentIds?: number[],
       replyToId?: number,
-    ): Promise<MessageDTO> => {
+    ): Promise<MessageDTO | null> => {
+      const hasAttachments = !!attachmentIds && attachmentIds.length > 0;
       const body: SendMessageRequest = { content };
       if (mentions && mentions.length > 0) body.mentions = mentions;
-      if (attachmentIds && attachmentIds.length > 0) body.attachmentIds = attachmentIds;
+      if (hasAttachments) body.attachmentIds = attachmentIds;
       if (replyToId) body.replyToId = replyToId;
-      const res = await apiPost<{ message: MessageDTO }>(`/api/chats/${chatId}/messages`, body);
-      setMessages((prev) => mergeMessages(prev, [res.message]));
-      return res.message;
+
+      // Attachment sends are never queued (see OutboxItem docs): the files were
+      // already uploaded, so "offline with attachments" can't arise — keep the
+      // original POST-and-throw path (composer restores + shows the error banner).
+      if (hasAttachments) {
+        const message = await postMessage(chatId, body);
+        setMessages((prev) => mergeMessages(prev, [message]));
+        return message;
+      }
+
+      // Text-only. Declared offline → queue without a request; the composer
+      // treats a resolved send as sent and clears immediately.
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        enqueue(content, mentions ?? [], replyToId);
+        return null;
+      }
+
+      try {
+        const message = await postMessage(chatId, body);
+        setMessages((prev) => mergeMessages(prev, [message]));
+        return message;
+      } catch (err) {
+        // Went offline mid-send (fetch network error) → queue it, resolve so the
+        // composer clears. A real HTTP error (ApiError) rethrows → banner + restore.
+        if (isNetworkError(err)) {
+          enqueue(content, mentions ?? [], replyToId);
+          return null;
+        }
+        throw err;
+      }
     },
-    [chatId],
+    [chatId, enqueue],
+  );
+
+  const retryOutbox = useCallback(
+    (tempKey: string) => {
+      commitOutbox((prev) =>
+        prev.map((i) => (i.tempKey === tempKey ? { ...i, status: 'sending' } : i)),
+      );
+      void flush();
+    },
+    [commitOutbox, flush],
+  );
+
+  const discardOutbox = useCallback(
+    (tempKey: string) => {
+      commitOutbox((prev) => prev.filter((i) => i.tempKey !== tempKey));
+    },
+    [commitOutbox],
   );
 
   const editMessage = useCallback(
@@ -731,6 +993,9 @@ export function useMessages(chatId: number, options: UseMessagesOptions = {}): U
     editMessage,
     deleteMessage,
     toggleReaction: toggleReactionCb,
+    outbox,
+    retryOutbox,
+    discardOutbox,
     loading,
     error,
   };

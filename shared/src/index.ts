@@ -24,11 +24,14 @@ export interface ChatMemberDTO extends UserDTO {
 export type ChatType = 'dm' | 'group';
 
 /**
- * 'video' is assigned only to browser-safe types (video/mp4, video/webm),
- * which the client renders inline via <video> (served with Range support);
- * any other video/* mime stays 'file' (a download card).
+ * 'video' is assigned only to browser-safe types (video/mp4, video/webm,
+ * video/quicktime), which the client renders inline via <video> (served with
+ * Range support); 'audio' likewise for browser-safe audio (audio/webm,
+ * audio/mp4, audio/mpeg, audio/ogg — voice messages record as webm/opus or
+ * mp4/AAC on iOS) rendered as an inline <audio> player; any other video/* or
+ * audio/* mime stays 'file' (a download card).
  */
-export type AttachmentKind = 'image' | 'video' | 'file';
+export type AttachmentKind = 'image' | 'video' | 'audio' | 'file';
 
 /** The fixed palette of emoji a message may be reacted with. */
 export const REACTION_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🙏'] as const;
@@ -71,6 +74,21 @@ export interface ReplyToDTO {
   hasAttachments: boolean;
 }
 
+/**
+ * Open Graph summary of the first http(s) URL in a message, fetched
+ * server-side after send (SSRF-guarded) and delivered via `message:updated`
+ * once resolved. `imageUrl` is the remote og:image URL — the client hotlinks
+ * it (same IP exposure as tapping the link itself); the server never proxies
+ * or stores preview images.
+ */
+export interface LinkPreviewDTO {
+  url: string;
+  title: string;
+  description: string | null;
+  imageUrl: string | null;
+  siteName: string | null;
+}
+
 export interface MessageDTO {
   id: number;
   chatId: number;
@@ -92,6 +110,11 @@ export interface MessageDTO {
   replyTo: ReplyToDTO | null;
   /** ISO 8601 */
   createdAt: string;
+  /**
+   * Link preview for the first URL in the content, when one has resolved
+   * (null/absent before resolution, after a failed fetch, and for tombstones).
+   */
+  linkPreview?: LinkPreviewDTO | null;
   /** ISO 8601 of the last edit, or null when never edited. Always null for tombstones. */
   editedAt: string | null;
   /**
@@ -109,6 +132,12 @@ export interface ChatSummaryDTO {
   members: ChatMemberDTO[];
   lastMessage: MessageDTO | null;
   unreadCount: number;
+  /**
+   * Whether I muted this chat (personalized, like unreadCount). Muted chats
+   * receive no web-push notifications; sockets/unread counts are unaffected.
+   * Toggled via PUT /api/chats/:id/mute { muted: boolean } → 204.
+   */
+  muted?: boolean;
 }
 
 // ---------- Request bodies ----------

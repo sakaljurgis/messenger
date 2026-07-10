@@ -217,6 +217,65 @@ describe('POST /api/chats/:chatId/attachments — upload', () => {
     expect(a.mimeType).toBe('video/mp4');
   });
 
+  it('classifies the browser-safe audio mimes as inline audio (no thumbnail/dimensions)', async () => {
+    const cases: Array<[string, string]> = [
+      ['note.webm', 'audio/webm'],
+      ['note.m4a', 'audio/mp4'],
+      ['note.mp3', 'audio/mpeg'],
+      ['note.ogg', 'audio/ogg'],
+    ];
+    for (const [name, mime] of cases) {
+      const bytes = randomBytes(2048);
+      const res = await upload(alice, dm, bytes, name, mime);
+      expect(res.status).toBe(201);
+      const a = res.body.attachment as AttachmentDTO;
+      expect(a.kind).toBe('audio');
+      expect(a.mimeType).toBe(mime);
+      expect(a.width).toBeNull();
+      expect(a.height).toBeNull();
+      expect(a.hasThumb).toBe(false);
+      expect(a.sizeBytes).toBe(bytes.length);
+    }
+  });
+
+  it('strips codec parameters from a voice-note mime (audio/webm;codecs=opus → audio)', async () => {
+    const bytes = randomBytes(2048);
+    const res = await upload(alice, dm, bytes, 'voice-1.webm', 'audio/webm;codecs=opus');
+    expect(res.status).toBe(201);
+    const a = res.body.attachment as AttachmentDTO;
+    expect(a.kind).toBe('audio');
+    expect(a.mimeType).toBe('audio/webm');
+  });
+
+  it('rescues a .m4a reported as octet-stream via the extension fallback (audio/mp4)', async () => {
+    const bytes = randomBytes(2048);
+    const res = await upload(alice, dm, bytes, 'voice.m4a', 'application/octet-stream');
+    expect(res.status).toBe(201);
+    const a = res.body.attachment as AttachmentDTO;
+    expect(a.kind).toBe('audio');
+    expect(a.mimeType).toBe('audio/mp4');
+  });
+
+  it('does NOT flip an octet-stream .webm to audio (ambiguous extension stays video)', async () => {
+    const bytes = randomBytes(2048);
+    const res = await upload(alice, dm, bytes, 'clip.webm', 'application/octet-stream');
+    expect(res.status).toBe(201);
+    const a = res.body.attachment as AttachmentDTO;
+    expect(a.kind).toBe('video');
+    expect(a.mimeType).toBe('video/webm');
+  });
+
+  it('classifies any other audio/* mime as a plain file (no inline rendering)', async () => {
+    const wav = randomBytes(2048);
+    const res = await upload(alice, dm, wav, 'sound.wav', 'audio/wav');
+    expect(res.status).toBe(201);
+    const a = res.body.attachment as AttachmentDTO;
+    expect(a.kind).toBe('file');
+    expect(a.mimeType).toBe('audio/wav');
+    expect(a.width).toBeNull();
+    expect(a.height).toBeNull();
+  });
+
   it('leaves a non-video octet-stream upload as a plain file', async () => {
     const blob = randomBytes(2048);
     const res = await upload(alice, dm, blob, 'data.bin', 'application/octet-stream');
@@ -510,6 +569,45 @@ describe('GET /api/attachments/:id — serving', () => {
     expect(res.headers['content-disposition']).toBe('attachment');
     expect(res.headers['x-content-type-options']).toBe('nosniff');
     expect(res.headers['content-security-policy']).toBe('sandbox');
+  });
+
+  it('serves a voice note inline (Content-Type audio/webm) with a correct 206 byte slice', async () => {
+    const bytes = randomBytes(5000);
+    const up = await upload(alice, group, bytes, 'voice-1.webm', 'audio/webm;codecs=opus');
+    const att = up.body.attachment as AttachmentDTO;
+    await alice.agent
+      .post(`/api/chats/${group}/messages`)
+      .send({ content: '', attachmentIds: [att.id] });
+
+    const res = await bob.agent
+      .get(`/api/attachments/${att.id}`)
+      .set('Range', 'bytes=0-99')
+      .buffer(true)
+      .parse(binaryParser);
+
+    expect(res.status).toBe(206);
+    expect(res.headers['content-type']).toBe('audio/webm');
+    expect(res.headers['content-range']).toBe(`bytes 0-99/${bytes.length}`);
+    expect((res.body as Buffer).equals(bytes.subarray(0, 100))).toBe(true);
+    // Safe audio is never forced to download.
+    expect(res.headers['content-disposition']).toBeUndefined();
+    expect(res.headers['x-content-type-options']).toBe('nosniff');
+    expect(res.headers['content-security-policy']).toBe('sandbox');
+  });
+
+  it('keeps an unsafe audio/* (kind file) forced to download', async () => {
+    const bytes = randomBytes(5000);
+    const up = await upload(alice, group, bytes, 'sound.wav', 'audio/wav');
+    const att = up.body.attachment as AttachmentDTO;
+    await alice.agent
+      .post(`/api/chats/${group}/messages`)
+      .send({ content: '', attachmentIds: [att.id] });
+
+    const res = await bob.agent.get(`/api/attachments/${att.id}`);
+
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toBe('application/octet-stream');
+    expect(res.headers['content-disposition']).toBe('attachment');
   });
 
   it('forces a download with an RFC5987-encoded filename via ?download=1', async () => {

@@ -5,7 +5,20 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import type { AttachmentDTO, ChatMemberDTO, ChatSummaryDTO, MessageDTO, MessagesPage, UserDTO } from '@messenger/shared';
 import ChatPage from './ChatPage';
 import { AuthProvider } from '../lib/auth';
-import { formatBytes } from '../lib/attachments';
+import { ApiError } from '../lib/api';
+import { formatBytes, uploadAttachment } from '../lib/attachments';
+
+// Mock the network side of attachments (only the offline-attachment test drives
+// it); keep the pure helpers (attachmentUrl, formatBytes, …) real so every other
+// test's attachment rendering is genuine.
+vi.mock('../lib/attachments', async (importActual) => {
+  const actual = await importActual<typeof import('../lib/attachments')>();
+  return {
+    ...actual,
+    compressImage: vi.fn(async (f: File) => f),
+    uploadAttachment: vi.fn(),
+  };
+});
 
 // A tiny in-memory stand-in for the Socket.IO client so tests can drive server
 // events synchronously (and no real connection is opened in jsdom).
@@ -181,6 +194,19 @@ function videoAttachment(id: number, name = 'clip.mp4'): AttachmentDTO {
   };
 }
 
+function audioAttachment(id: number, name = 'voice-1.webm'): AttachmentDTO {
+  return {
+    id,
+    kind: 'audio',
+    originalName: name,
+    mimeType: 'audio/webm',
+    sizeBytes: 40_000,
+    width: null,
+    height: null,
+    hasThumb: false,
+  };
+}
+
 function fileAttachment(id: number, name = 'report.pdf', sizeBytes = 3_355_443): AttachmentDTO {
   return {
     id,
@@ -216,6 +242,11 @@ function scrollAwayFromBottom(scrollEl: HTMLElement) {
   fireEvent.scroll(scrollEl);
 }
 
+/** Flip the browser's declared connectivity (navigator.onLine) for offline tests. */
+function setOnline(value: boolean) {
+  Object.defineProperty(navigator, 'onLine', { value, configurable: true });
+}
+
 function renderChatPage(entry = '/chats/10') {
   return render(
     <MemoryRouter initialEntries={[entry]}>
@@ -232,7 +263,10 @@ function renderChatPage(entry = '/chats/10') {
 describe('ChatPage', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.mocked(uploadAttachment).mockReset();
     delete (navigator as unknown as { clipboard?: unknown }).clipboard;
+    setOnline(true);
+    localStorage.clear();
   });
 
   it('renders fetched messages with mine right/blue and others left/gray', async () => {
@@ -375,6 +409,34 @@ describe('ChatPage', () => {
     expect(grid?.querySelector('video')).toBeNull();
   });
 
+  it('renders an audio attachment as an inline <audio> player with the right src', async () => {
+    const audioMsg: MessageDTO = { ...msg(1, bob, ''), attachments: [audioAttachment(88)] };
+    stubFetch({ messages: [audioMsg] });
+    renderChatPage();
+
+    const audio = await screen.findByTestId('audio-attachment');
+    expect(audio.tagName).toBe('AUDIO');
+    expect(audio.getAttribute('src')).toBe('/api/attachments/88');
+    expect(audio.hasAttribute('controls')).toBe(true);
+    expect(audio.getAttribute('preload')).toBe('metadata');
+  });
+
+  it('renders audio as its own block, never inside the image grid', async () => {
+    const mixedMsg: MessageDTO = {
+      ...msg(1, bob, ''),
+      attachments: [imageAttachment(42), imageAttachment(43), audioAttachment(88)],
+    };
+    stubFetch({ messages: [mixedMsg] });
+    const { container } = renderChatPage();
+
+    const audio = await screen.findByTestId('audio-attachment');
+    expect(audio.closest('.grid')).toBeNull();
+
+    const grid = container.querySelector('.grid');
+    expect(grid?.querySelectorAll('img')).toHaveLength(2);
+    expect(grid?.querySelector('audio')).toBeNull();
+  });
+
   it('renders a file attachment as a download card with name and size', async () => {
     const fileMsg: MessageDTO = { ...msg(1, bob, ''), attachments: [fileAttachment(9)] };
     stubFetch({ messages: [fileMsg] });
@@ -473,6 +535,35 @@ describe('ChatPage', () => {
     expect(await screen.findByText('Message deleted')).toBeInTheDocument();
     expect(screen.queryByText('Delete me')).not.toBeInTheDocument();
     confirmSpy.mockRestore();
+  });
+
+  it('renders a link-preview card and attaches one live via message:updated', async () => {
+    const preview = {
+      url: 'https://example.com/article',
+      title: 'An Example Article',
+      description: 'Something worth reading',
+      imageUrl: 'https://example.com/og.png',
+      siteName: 'Example',
+    };
+    stubFetch({ messages: [msg(1, bob, 'see https://example.com/article')] });
+    renderChatPage();
+    await screen.findByText(/see/);
+
+    // No card until the server resolves the preview…
+    expect(screen.queryByText('An Example Article')).not.toBeInTheDocument();
+
+    // …then message:updated (the link-preview subscriber's emission) attaches it.
+    await emitFromServer('message:updated', {
+      ...msg(1, bob, 'see https://example.com/article'),
+      linkPreview: preview,
+    });
+
+    const card = screen.getByText('An Example Article').closest('a') as HTMLAnchorElement;
+    expect(card).toHaveAttribute('href', 'https://example.com/article');
+    expect(card).toHaveAttribute('target', '_blank');
+    expect(within(card).getByText('Something worth reading')).toBeInTheDocument();
+    expect(within(card).getByText('Example')).toBeInTheDocument();
+    expect(card.querySelector('img')).toHaveAttribute('src', 'https://example.com/og.png');
   });
 
   it('replaces a bubble live when a message:updated (edit) arrives over the socket', async () => {
@@ -1406,6 +1497,298 @@ describe('ChatPage', () => {
 
       expect(await screen.findByText('the original message body')).toBeInTheDocument();
       expect(fetchMock.mock.calls.some(([i]) => i.toString().includes('around=1'))).toBe(true);
+    });
+  });
+
+  describe('offline outbox', () => {
+    /** POST calls a fetch stub recorded (method === 'POST' to /messages). */
+    function postCalls(fetchMock: ReturnType<typeof stubFetch>) {
+      return fetchMock.mock.calls.filter(
+        ([i, init]) => i.toString().includes('/messages') && init?.method === 'POST',
+      );
+    }
+
+    /** The persisted outbox for chat 10, parsed (or [] when absent). */
+    function storedOutbox() {
+      return JSON.parse(localStorage.getItem('outbox:chat:10') ?? '[]') as Array<{
+        content: string;
+        status: string;
+      }>;
+    }
+
+    it('queues a text send made while offline, renders a "sending" bubble, and clears the composer without POSTing', async () => {
+      const fetchMock = stubFetch({ messages: [msg(1, bob, 'Hi from Bob')] });
+      setOnline(false);
+      renderChatPage();
+      await screen.findByText('Hi from Bob');
+
+      const input = screen.getByPlaceholderText('Aa');
+      await userEvent.type(input, 'queued while offline');
+      await userEvent.click(screen.getByRole('button', { name: /send/i }));
+
+      // The bubble appears in its optimistic "sending" state and the composer clears.
+      expect(await screen.findByText('queued while offline')).toBeInTheDocument();
+      expect(screen.getByText('Sending…')).toBeInTheDocument();
+      expect(input).toHaveValue('');
+
+      // Persisted to localStorage; no POST was attempted while offline.
+      await waitFor(() => expect(storedOutbox()).toHaveLength(1));
+      expect(storedOutbox()[0]?.content).toBe('queued while offline');
+      expect(postCalls(fetchMock)).toHaveLength(0);
+    });
+
+    it('flushes the queue in order on socket reconnect, turning sending bubbles into real messages', async () => {
+      const posted: string[] = [];
+      const fetchMock = stubFetch({
+        messages: [msg(1, bob, 'Hi from Bob')],
+        onPost: (body) => {
+          const content = (body as { content: string }).content;
+          posted.push(content);
+          return msg(100 + posted.length, me, content);
+        },
+      });
+      setOnline(false);
+      renderChatPage();
+      await screen.findByText('Hi from Bob');
+
+      // Queue two sends while offline.
+      await userEvent.type(screen.getByPlaceholderText('Aa'), 'first');
+      await userEvent.click(screen.getByRole('button', { name: /send/i }));
+      await userEvent.type(screen.getByPlaceholderText('Aa'), 'second');
+      await userEvent.click(screen.getByRole('button', { name: /send/i }));
+      await waitFor(() => expect(storedOutbox()).toHaveLength(2));
+
+      // Reconnect: the socket 'connect' event flushes the outbox sequentially.
+      setOnline(true);
+      act(() => {
+        socket.connect();
+      });
+
+      // Both POSTed in queue order; queue drained; the sending labels are gone.
+      await waitFor(() => expect(posted).toEqual(['first', 'second']));
+      await waitFor(() => expect(localStorage.getItem('outbox:chat:10')).toBeNull());
+      expect(screen.queryByText('Sending…')).not.toBeInTheDocument();
+      expect(postCalls(fetchMock)).toHaveLength(2);
+    });
+
+    it('flushes on the browser "online" event too', async () => {
+      const fetchMock = stubFetch({
+        messages: [msg(1, bob, 'Hi from Bob')],
+        onPost: (body) => msg(101, me, (body as { content: string }).content),
+      });
+      setOnline(false);
+      renderChatPage();
+      await screen.findByText('Hi from Bob');
+
+      await userEvent.type(screen.getByPlaceholderText('Aa'), 'sync me');
+      await userEvent.click(screen.getByRole('button', { name: /send/i }));
+      await waitFor(() => expect(storedOutbox()).toHaveLength(1));
+
+      setOnline(true);
+      act(() => {
+        window.dispatchEvent(new Event('online'));
+      });
+
+      await waitFor(() => expect(localStorage.getItem('outbox:chat:10')).toBeNull());
+      expect(postCalls(fetchMock)).toHaveLength(1);
+    });
+
+    it('stops the flush on a mid-flush network failure, leaving the remainder queued', async () => {
+      let n = 0;
+      stubFetch({
+        messages: [msg(1, bob, 'Hi from Bob')],
+        onPost: (body) => {
+          n += 1;
+          if (n === 1) return msg(101, me, (body as { content: string }).content);
+          throw new TypeError('Failed to fetch'); // offline again on the 2nd
+        },
+      });
+      setOnline(false);
+      renderChatPage();
+      await screen.findByText('Hi from Bob');
+
+      await userEvent.type(screen.getByPlaceholderText('Aa'), 'aaa');
+      await userEvent.click(screen.getByRole('button', { name: /send/i }));
+      await userEvent.type(screen.getByPlaceholderText('Aa'), 'bbb');
+      await userEvent.click(screen.getByRole('button', { name: /send/i }));
+      await waitFor(() => expect(storedOutbox()).toHaveLength(2));
+
+      setOnline(true);
+      act(() => {
+        window.dispatchEvent(new Event('online'));
+      });
+
+      // First succeeded and drained; second stayed queued (still "sending").
+      await waitFor(() => {
+        const stored = storedOutbox();
+        expect(stored).toHaveLength(1);
+        expect(stored[0]?.content).toBe('bbb');
+        expect(stored[0]?.status).toBe('sending');
+      });
+      expect(screen.getByText('Sending…')).toBeInTheDocument();
+    });
+
+    it('marks an item failed on an HTTP 400 during flush, then a tap-retry sends it', async () => {
+      let mode: 'fail' | 'ok' = 'fail';
+      stubFetch({
+        messages: [msg(1, bob, 'Hi from Bob')],
+        onPost: (body) => {
+          if (mode === 'fail') throw new ApiError(400, 'Invalid reply target');
+          return msg(200, me, (body as { content: string }).content);
+        },
+      });
+      setOnline(false);
+      renderChatPage();
+      await screen.findByText('Hi from Bob');
+
+      await userEvent.type(screen.getByPlaceholderText('Aa'), 'stale reply send');
+      await userEvent.click(screen.getByRole('button', { name: /send/i }));
+      await waitFor(() => expect(storedOutbox()).toHaveLength(1));
+
+      // Flush hits the 400 → the item is marked failed (kept, with a retry affordance).
+      setOnline(true);
+      act(() => {
+        window.dispatchEvent(new Event('online'));
+      });
+      expect(await screen.findByText('failed — tap to retry')).toBeInTheDocument();
+      await waitFor(() => expect(storedOutbox()[0]?.status).toBe('failed'));
+
+      // Server recovers; tapping retry re-queues + reflushes, and it lands.
+      mode = 'ok';
+      await userEvent.click(screen.getByText('failed — tap to retry'));
+      await waitFor(() => expect(localStorage.getItem('outbox:chat:10')).toBeNull());
+      expect(screen.queryByText('failed — tap to retry')).not.toBeInTheDocument();
+    });
+
+    it('discards a failed item via its ✕ button', async () => {
+      stubFetch({
+        messages: [msg(1, bob, 'Hi from Bob')],
+        onPost: () => {
+          throw new ApiError(400, 'Invalid reply target');
+        },
+      });
+      setOnline(false);
+      renderChatPage();
+      await screen.findByText('Hi from Bob');
+
+      await userEvent.type(screen.getByPlaceholderText('Aa'), 'discard me');
+      await userEvent.click(screen.getByRole('button', { name: /send/i }));
+      await waitFor(() => expect(storedOutbox()).toHaveLength(1));
+
+      setOnline(true);
+      act(() => {
+        window.dispatchEvent(new Event('online'));
+      });
+      await screen.findByText('failed — tap to retry');
+
+      await userEvent.click(screen.getByLabelText('Discard message'));
+
+      expect(screen.queryByText('failed — tap to retry')).not.toBeInTheDocument();
+      expect(screen.queryByText('discard me')).not.toBeInTheDocument();
+      await waitFor(() => expect(localStorage.getItem('outbox:chat:10')).toBeNull());
+    });
+
+    it('keeps the old error-banner path for an offline send WITH attachments (files cannot queue)', async () => {
+      vi.mocked(uploadAttachment).mockResolvedValue(fileAttachment(9));
+      stubFetch({
+        messages: [msg(1, bob, 'Hi from Bob')],
+        onPost: () => {
+          throw new TypeError('Failed to fetch');
+        },
+      });
+      setOnline(false);
+      renderChatPage();
+      await screen.findByText('Hi from Bob');
+
+      // Stage a file (upload is mocked to resolve), then send while offline.
+      const file = new File(['pdf'], 'report.pdf', { type: 'application/pdf' });
+      fireEvent.change(screen.getByTestId('file-input'), { target: { files: [file] } });
+      await waitFor(() => expect(screen.getByRole('button', { name: /send/i })).not.toBeDisabled());
+      await userEvent.click(screen.getByRole('button', { name: /send/i }));
+
+      // Attachment sends never queue: the network error surfaces as the banner and
+      // the file is restored to the preview strip — no optimistic outbox bubble.
+      expect(await screen.findByRole('alert')).toBeInTheDocument();
+      expect(screen.queryByText('Sending…')).not.toBeInTheDocument();
+      expect(localStorage.getItem('outbox:chat:10')).toBeNull();
+      expect(screen.getByLabelText('Attachments to send')).toBeInTheDocument();
+    });
+
+    it('persists across a reload: a primed queue renders offline and flushes when back online', async () => {
+      // Simulate a prior session's unsent message left in localStorage.
+      localStorage.setItem(
+        'outbox:chat:10',
+        JSON.stringify([
+          { tempKey: 'reload-1', content: 'survived reload', mentions: [], createdAt: new Date().toISOString(), status: 'sending' },
+        ]),
+      );
+      const fetchMock = stubFetch({
+        messages: [msg(1, bob, 'Hi from Bob')],
+        onPost: (body) => msg(300, me, (body as { content: string }).content),
+      });
+      setOnline(false);
+      renderChatPage();
+      await screen.findByText('Hi from Bob');
+
+      // The persisted item renders as a sending bubble on open (reload survived).
+      expect(await screen.findByText('survived reload')).toBeInTheDocument();
+      expect(screen.getByText('Sending…')).toBeInTheDocument();
+      expect(postCalls(fetchMock)).toHaveLength(0);
+
+      // Coming back online flushes it.
+      setOnline(true);
+      act(() => {
+        window.dispatchEvent(new Event('online'));
+      });
+      await waitFor(() => expect(localStorage.getItem('outbox:chat:10')).toBeNull());
+      expect(postCalls(fetchMock)).toHaveLength(1);
+    });
+
+    it('hides outbox bubbles in windowed (focus) mode', async () => {
+      localStorage.setItem(
+        'outbox:chat:10',
+        JSON.stringify([
+          { tempKey: 'w-1', content: 'hidden while windowed', mentions: [], createdAt: new Date().toISOString(), status: 'sending' },
+        ]),
+      );
+      const windowPage: MessagesPage = {
+        messages: [msg(2, me, 'second'), msg(3, bob, 'target message'), msg(4, me, 'fourth')],
+        nextCursor: null,
+        newerCursor: 4, // not at the live edge
+      };
+      // Offline so the primed item can't flush away before we assert it's hidden.
+      setOnline(false);
+      stubFetch({ messages: [], onAround: () => windowPage });
+      renderChatPage('/chats/10?message=3');
+
+      await screen.findByText('target message');
+
+      // Windowed view suppresses outbox bubbles (like live message:new).
+      expect(screen.queryByText('hidden while windowed')).not.toBeInTheDocument();
+      expect(screen.queryByText('Sending…')).not.toBeInTheDocument();
+      // But it is still persisted, waiting for the live edge.
+      expect(storedOutbox()).toHaveLength(1);
+    });
+
+    it('keeps the old error-banner path for an online HTTP-error send (never queues it)', async () => {
+      setOnline(true);
+      stubFetch({
+        messages: [msg(1, bob, 'Hi from Bob')],
+        onPost: () => {
+          throw new ApiError(400, 'String must contain at most 4000 character(s)');
+        },
+      });
+      renderChatPage();
+      await screen.findByText('Hi from Bob');
+
+      await userEvent.type(screen.getByPlaceholderText('Aa'), 'over the limit');
+      await userEvent.click(screen.getByRole('button', { name: /send/i }));
+
+      // HTTP errors keep today's behavior: banner + restored composer text, no queue.
+      expect(await screen.findByRole('alert')).toHaveTextContent('String must contain at most 4000 character(s)');
+      expect(screen.getByPlaceholderText('Aa')).toHaveValue('over the limit');
+      expect(screen.queryByText('Sending…')).not.toBeInTheDocument();
+      expect(localStorage.getItem('outbox:chat:10')).toBeNull();
     });
   });
 });

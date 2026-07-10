@@ -1,7 +1,7 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import type { ChatSummaryDTO, UserDTO } from '@messenger/shared';
-import { apiGet, apiPatch, apiPost } from '../lib/api';
+import { apiGet, apiPatch, apiPost, apiPut } from '../lib/api';
 import { groupColors } from '../lib/chats';
 import { useOnlineUsers } from '../lib/presence';
 import Avatar from './Avatar';
@@ -23,10 +23,17 @@ function CheckIcon() {
 }
 
 /**
- * Full-screen group info sheet: member list, add-members picker, leave button.
- * `chat` stays live — ChatPage's useChat applies `chat:updated` (e.g. after an
- * add) and re-renders this sheet with the new member list. Leaving navigates
- * back to the chat list; the server's `chat:removed` cleans up other tabs.
+ * Full-screen group info sheet: member list, add-members picker, mute toggle,
+ * leave button. `chat` stays live — ChatPage's useChat applies `chat:updated`
+ * (e.g. after an add) and re-renders this sheet with the new member list.
+ * Leaving navigates back to the chat list; the server's `chat:removed` cleans
+ * up other tabs.
+ *
+ * Mute is the one exception: it's a personal flag (like a read marker), so the
+ * server does NOT emit `chat:updated` for it — broadcasting it would leak into
+ * other members' personalized summaries. This sheet therefore tracks it in its
+ * own local state (seeded from `chat.muted`, updated optimistically on toggle)
+ * rather than relying on the live `chat` prop to reflect it.
  */
 export default function GroupInfo({
   chat,
@@ -45,12 +52,26 @@ export default function GroupInfo({
   const [error, setError] = useState<string | null>(null);
   const [renaming, setRenaming] = useState(false);
   const [nameDraft, setNameDraft] = useState(chat.name ?? '');
+  const [muted, setMuted] = useState(chat.muted ?? false);
+  const [muteBusy, setMuteBusy] = useState(false);
 
   // Keep the draft in sync with the live name (e.g. renamed in another tab)
   // while the form is closed; an open edit is never clobbered.
   useEffect(() => {
     if (!renaming) setNameDraft(chat.name ?? '');
   }, [chat.name, renaming]);
+
+  // Re-seed only when the CHAT itself changes (defensive — in practice this
+  // sheet is remounted fresh each time it opens, per ChatPage). Deliberately
+  // NOT keyed on `chat.muted`: the mute endpoint emits no `chat:updated`, so
+  // the live `chat` prop never reflects our own toggle — resyncing on every
+  // `chat.muted` render would immediately stomp our own optimistic update back
+  // to the stale prop value once the request settles.
+  const lastChatId = useRef(chat.id);
+  if (lastChatId.current !== chat.id) {
+    lastChatId.current = chat.id;
+    setMuted(chat.muted ?? false);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -106,6 +127,22 @@ export default function GroupInfo({
       setError(err instanceof Error ? err.message : 'Could not rename group');
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function toggleMute() {
+    if (muteBusy) return;
+    const next = !muted;
+    setMuted(next); // optimistic — the server never echoes this back via a socket event
+    setMuteBusy(true);
+    setError(null);
+    try {
+      await apiPut(`/api/chats/${chat.id}/mute`, { muted: next });
+    } catch (err) {
+      setMuted(!next); // revert
+      setError(err instanceof Error ? err.message : 'Could not update notifications');
+    } finally {
+      setMuteBusy(false);
     }
   }
 
@@ -191,6 +228,27 @@ export default function GroupInfo({
                 <p className="text-sm text-gray-500 dark:text-gray-400">{chat.members.length} members</p>
               </div>
             )}
+          </div>
+
+          <div className="mb-4 flex items-center justify-between rounded-xl px-2 py-2">
+            <span className="font-medium text-gray-900 dark:text-gray-100">Mute notifications</span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={muted}
+              aria-label="Mute notifications"
+              onClick={toggleMute}
+              disabled={muteBusy}
+              className={`relative h-6 w-11 flex-shrink-0 rounded-full transition-colors disabled:opacity-60 ${
+                muted ? 'bg-[#0084ff]' : 'bg-gray-300 dark:bg-gray-600'
+              }`}
+            >
+              <span
+                className={`absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                  muted ? 'translate-x-5' : 'translate-x-0'
+                }`}
+              />
+            </button>
           </div>
 
           {error && <p className="pb-2 text-sm text-red-600 dark:text-red-400">{error}</p>}

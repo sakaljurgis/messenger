@@ -6,6 +6,7 @@ import { createApp } from './app.js';
 import { startAttachmentCleanup } from './cleanup.js';
 import { createDb } from './db/index.js';
 import { createChatEvents } from './events.js';
+import { initLinkPreviews } from './link-previews.js';
 import { initPush } from './push.js';
 import { initSocket } from './socket.js';
 import { createStorage } from './storage.js';
@@ -46,6 +47,10 @@ initPush(db, events, socket.isUserConnected);
 
 // Webhooks: POSTs new messages to any bot member's webhookUrl (see webhooks.ts).
 initWebhooks(db, events);
+
+// Link previews: fetches Open Graph metadata for the first URL in a message
+// and attaches it via a follow-up `message:updated` (see link-previews.ts).
+initLinkPreviews(db, events);
 
 // In production the container serves the built client from ../client/dist.
 if (process.env.NODE_ENV === 'production') {

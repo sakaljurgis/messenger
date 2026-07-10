@@ -76,6 +76,8 @@ export const chatMembers = sqliteTable(
       .$defaultFn(() => new Date()),
     /** Unread counts: messages with id > this are unread. */
     lastReadMessageId: integer('last_read_message_id').notNull().default(0),
+    /** Per-member mute: suppresses web-push for this chat only (sockets/unread unaffected). */
+    muted: integer('muted', { mode: 'boolean' }).notNull().default(false),
   },
   (t) => [
     primaryKey({ columns: [t.chatId, t.userId] }),
@@ -116,6 +118,12 @@ export const messages = sqliteTable(
     editedAt: integer('edited_at', { mode: 'timestamp' }),
     /** Set on soft-delete; null while the message is live. Deleted messages serialize as tombstones. */
     deletedAt: integer('deleted_at', { mode: 'timestamp' }),
+    /**
+     * JSON-serialized LinkPreviewDTO for the first URL in the content, written
+     * by the link-preview subscriber after send; null before resolution, when
+     * no URL exists, or when the fetch failed.
+     */
+    linkPreview: text('link_preview'),
   },
   (t) => [index('messages_chat_idx').on(t.chatId, t.id)],
 );
@@ -170,7 +178,7 @@ export const attachments = sqliteTable(
       .references(() => users.id),
     /** Null until a message links this attachment on send; then the owning message. */
     messageId: integer('message_id').references(() => messages.id),
-    kind: text('kind', { enum: ['image', 'video', 'file'] }).notNull(),
+    kind: text('kind', { enum: ['image', 'video', 'audio', 'file'] }).notNull(),
     originalName: text('original_name').notNull(),
     mimeType: text('mime_type').notNull(),
     sizeBytes: integer('size_bytes').notNull(),

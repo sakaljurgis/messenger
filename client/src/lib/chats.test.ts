@@ -1,17 +1,24 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import type { ChatMemberDTO, ChatSummaryDTO, MessageDTO, UserDTO } from '@messenger/shared';
+import { ApiError } from './api';
 import {
   chatInitials,
   chatTitle,
   firstUnreadMessageId,
   highlightSegments,
+  isNetworkError,
+  loadOutbox,
+  makeOutboxTempKey,
   mergeMessages,
+  outboxStorageKey,
   readPositions,
   replaceMessage,
+  saveOutbox,
   searchSnippet,
   searchTerms,
   tombstone,
   upsertChat,
+  type OutboxItem,
 } from './chats';
 
 const ann: ChatMemberDTO = {
@@ -305,6 +312,70 @@ describe('highlightSegments', () => {
 
   it('returns the whole string unmarked when there are no terms', () => {
     expect(highlightSegments('untouched', [])).toEqual([{ text: 'untouched', match: false }]);
+  });
+});
+
+describe('offline outbox persistence', () => {
+  beforeEach(() => localStorage.clear());
+
+  function item(over: Partial<OutboxItem> = {}): OutboxItem {
+    return { tempKey: 'k1', content: 'hi', mentions: [], createdAt: 'now', status: 'sending', ...over };
+  }
+
+  it('namespaces the storage key per chat', () => {
+    expect(outboxStorageKey(7)).toBe('outbox:chat:7');
+    expect(outboxStorageKey(42)).toBe('outbox:chat:42');
+  });
+
+  it('round-trips items through localStorage', () => {
+    const items = [item({ tempKey: 'a', content: 'one', mentions: [2], replyToId: 5 }), item({ tempKey: 'b', content: 'two' })];
+    saveOutbox(10, items);
+    expect(loadOutbox(10)).toEqual(items);
+  });
+
+  it('removes the key when saving an empty list', () => {
+    saveOutbox(10, [item()]);
+    saveOutbox(10, []);
+    expect(localStorage.getItem('outbox:chat:10')).toBeNull();
+    expect(loadOutbox(10)).toEqual([]);
+  });
+
+  it('returns [] for a missing or corrupt entry', () => {
+    expect(loadOutbox(999)).toEqual([]);
+    localStorage.setItem('outbox:chat:5', 'not json');
+    expect(loadOutbox(5)).toEqual([]);
+  });
+
+  it('filters out malformed entries, keeping the valid ones', () => {
+    localStorage.setItem(
+      'outbox:chat:5',
+      JSON.stringify([{ nope: true }, item({ tempKey: 'good' }), { status: 'bogus' }]),
+    );
+    expect(loadOutbox(5).map((i) => i.tempKey)).toEqual(['good']);
+  });
+});
+
+describe('makeOutboxTempKey', () => {
+  it('generates unique, prefixed keys', () => {
+    const a = makeOutboxTempKey();
+    const b = makeOutboxTempKey();
+    expect(a).not.toBe(b);
+    expect(a).toMatch(/^outbox-/);
+  });
+});
+
+describe('isNetworkError', () => {
+  it('is true for a fetch TypeError (offline / unreachable)', () => {
+    expect(isNetworkError(new TypeError('Failed to fetch'))).toBe(true);
+  });
+
+  it('is false for an HTTP ApiError (4xx/5xx keeps the banner path)', () => {
+    expect(isNetworkError(new ApiError(400, 'Bad request'))).toBe(false);
+    expect(isNetworkError(new ApiError(500, 'Server error'))).toBe(false);
+  });
+
+  it('is false for a generic Error', () => {
+    expect(isNetworkError(new Error('boom'))).toBe(false);
   });
 });
 

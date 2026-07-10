@@ -6,6 +6,7 @@ import {
   type ChatMemberDTO,
   type MessageDTO,
   type ReactionGroupDTO,
+  type LinkPreviewDTO,
   type ReplyToDTO,
   type UserDTO,
 } from '@messenger/shared';
@@ -25,6 +26,7 @@ import {
   useChat,
   useChatTyping,
   useMessages,
+  type OutboxItem,
 } from '../lib/chats';
 import { useOnlineUsers } from '../lib/presence';
 import { attachmentUrl, formatBytes } from '../lib/attachments';
@@ -461,6 +463,25 @@ function AttachmentVideo({ video, isMine }: { video: AttachmentDTO; isMine: bool
   );
 }
 
+/**
+ * An 'audio' attachment (voice notes and the browser-safe audio mimes — see
+ * AttachmentKind): an inline `<audio>` with native controls (which supply the
+ * duration/scrubber), on its own block — never inside the image grid. A fixed
+ * width keeps a bare player from stretching edge to edge; `preload="metadata"`
+ * fetches just enough (via the Range-enabled endpoint) to know the duration.
+ */
+function AttachmentAudio({ audio }: { audio: AttachmentDTO }) {
+  return (
+    <audio
+      controls
+      preload="metadata"
+      src={attachmentUrl(audio.id)}
+      data-testid="audio-attachment"
+      className="w-64 max-w-full"
+    />
+  );
+}
+
 /** Non-image attachment: a download card styled like the message bubble. */
 function AttachmentFile({ file, isMine }: { file: AttachmentDTO; isMine: boolean }) {
   const bubble = isMine ? 'bg-[#0084ff] text-white' : 'bg-gray-200 text-gray-900 dark:bg-gray-700 dark:text-gray-100';
@@ -540,6 +561,7 @@ function MessageStack({
 }) {
   const images = message.attachments.filter((a) => a.kind === 'image');
   const videos = message.attachments.filter((a) => a.kind === 'video');
+  const audios = message.attachments.filter((a) => a.kind === 'audio');
   const files = message.attachments.filter((a) => a.kind === 'file');
   const hasText = message.content.length > 0;
   const bubble = isMine ? 'bg-[#0084ff] text-white' : 'bg-gray-200 text-gray-900 dark:bg-gray-700 dark:text-gray-100';
@@ -558,6 +580,9 @@ function MessageStack({
       {videos.map((v) => (
         <AttachmentVideo key={v.id} video={v} isMine={isMine} />
       ))}
+      {audios.map((a) => (
+        <AttachmentAudio key={a.id} audio={a} />
+      ))}
       {files.map((f) => (
         <AttachmentFile key={f.id} file={f} isMine={isMine} />
       ))}
@@ -567,7 +592,58 @@ function MessageStack({
           <MessageContent message={message} members={members} meId={meId} isMine={isMine} />
         </div>
       )}
+      {message.linkPreview && <LinkPreviewCard preview={message.linkPreview} />}
     </div>
+  );
+}
+
+/**
+ * Compact Open Graph card under a bubble whose message resolved a link preview
+ * (delivered async via message:updated). The og:image is hotlinked — the
+ * server never proxies it — so it loads lazily and quietly hides itself if the
+ * remote image fails. Tapping opens the ORIGINAL typed URL.
+ */
+function LinkPreviewCard({ preview }: { preview: LinkPreviewDTO }) {
+  let host = '';
+  try {
+    host = new URL(preview.url).hostname.replace(/^www\./, '');
+  } catch {
+    /* keep '' — the card just omits the host line */
+  }
+  return (
+    <a
+      href={preview.url}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="block w-64 max-w-full overflow-hidden rounded-xl border border-gray-200 bg-white transition-colors hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-800 dark:hover:bg-gray-700"
+    >
+      {preview.imageUrl && (
+        <img
+          src={preview.imageUrl}
+          alt=""
+          loading="lazy"
+          onError={(e) => {
+            e.currentTarget.style.display = 'none';
+          }}
+          className="max-h-32 w-full object-cover"
+        />
+      )}
+      <span className="flex flex-col gap-0.5 px-3 py-2">
+        <span className="line-clamp-2 text-sm font-medium text-gray-900 dark:text-gray-100">
+          {preview.title}
+        </span>
+        {preview.description && (
+          <span className="line-clamp-2 text-xs text-gray-500 dark:text-gray-400">
+            {preview.description}
+          </span>
+        )}
+        {(preview.siteName ?? host) && (
+          <span className="truncate text-[10px] uppercase tracking-wide text-gray-400 dark:text-gray-500">
+            {preview.siteName ?? host}
+          </span>
+        )}
+      </span>
+    </a>
   );
 }
 
@@ -795,6 +871,88 @@ function TypingIndicator({ names, isGroup }: { names: string[]; isGroup: boolean
   );
 }
 
+/** The little clock glyph shown where a queued bubble's timestamp would go. */
+function ClockIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+      <circle cx="12" cy="12" r="9" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4l2.5 1.5" />
+    </svg>
+  );
+}
+
+/**
+ * An optimistic bubble for a text send held in the offline outbox (see
+ * lib/chats). Styled like my own (blue, right-aligned) message but visually
+ * pending: reduced opacity with a 'Sending…' clock label while queued, or — if a
+ * flush hit an HTTP error — a red 'failed — tap to retry' affordance (tapping the
+ * bubble re-queues it) plus a ✕ to discard. Rendered at the live edge only.
+ */
+function OutboxBubble({
+  item,
+  members,
+  meId,
+  onRetry,
+  onDiscard,
+}: {
+  item: OutboxItem;
+  members: UserDTO[];
+  meId: number;
+  onRetry: () => void;
+  onDiscard: () => void;
+}) {
+  const failed = item.status === 'failed';
+  const bubble = (
+    <div
+      className={`break-words rounded-2xl bg-[#0084ff] px-3 py-2 text-white ${
+        failed ? '' : 'opacity-60'
+      }`}
+    >
+      <MessageMarkdown content={item.content} mentions={item.mentions} members={members} meId={meId} isMine />
+    </div>
+  );
+
+  return (
+    <div className="mt-0.5 flex justify-end px-3">
+      <div className="flex max-w-[75%] flex-col items-end">
+        {failed ? (
+          <button type="button" onClick={onRetry} aria-label="Retry sending message" className="block text-left">
+            {bubble}
+          </button>
+        ) : (
+          bubble
+        )}
+        {failed ? (
+          <span className="mt-0.5 flex items-center gap-1 text-[10px] text-red-500">
+            <button
+              type="button"
+              onClick={onRetry}
+              className="font-medium underline decoration-dotted underline-offset-2"
+            >
+              failed — tap to retry
+            </button>
+            <button
+              type="button"
+              onClick={onDiscard}
+              aria-label="Discard message"
+              className="flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full text-red-500 transition-colors hover:bg-red-100 dark:hover:bg-red-500/20"
+            >
+              <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M6 6l12 12M18 6L6 18" />
+              </svg>
+            </button>
+          </span>
+        ) : (
+          <span className="mt-0.5 flex items-center gap-1 text-[10px] text-gray-400 dark:text-gray-500">
+            <ClockIcon />
+            <span>Sending…</span>
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function ChatPage() {
   const params = useParams();
   const chatId = Number(params.id);
@@ -821,6 +979,9 @@ export default function ChatPage() {
     editMessage,
     deleteMessage,
     toggleReaction,
+    outbox,
+    retryOutbox,
+    discardOutbox,
     loading,
   } = useMessages(chatId, { targetMessageId: focusId, meId });
 
@@ -962,6 +1123,15 @@ export default function ChatPage() {
       bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
     }
   }, [messages, unreadBoundaryId, chatId, focusId]);
+
+  // Keep a freshly queued (outbox) send in view when we're pinned to the bottom.
+  // A queued send changes `outbox`, not `messages`, so the message-driven scroll
+  // effect above won't fire for it.
+  useEffect(() => {
+    if (atLiveEdge && stickToBottom.current) {
+      bottomRef.current?.scrollIntoView({ block: 'end' });
+    }
+  }, [outbox.length, atLiveEdge]);
 
   // Reset the jump-to-bottom pill's per-chat counters when the chat or focus
   // target changes. The unread-boundary freeze above self-heals via the
@@ -1229,6 +1399,20 @@ export default function ChatPage() {
               </button>
             </div>
           )}
+
+          {/* Optimistic bubbles for text sends queued while offline. Live edge
+              only — a windowed view suppresses them (like live message:new). */}
+          {atLiveEdge &&
+            outbox.map((item) => (
+              <OutboxBubble
+                key={item.tempKey}
+                item={item}
+                members={members}
+                meId={meId}
+                onRetry={() => retryOutbox(item.tempKey)}
+                onDiscard={() => discardOutbox(item.tempKey)}
+              />
+            ))}
 
           <TypingIndicator names={typingNames} isGroup={isGroup} />
           <div ref={bottomRef} />
