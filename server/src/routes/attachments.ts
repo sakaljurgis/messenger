@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
+import type { AttachmentKind } from '@messenger/shared';
 import { and, eq, isNull, lt } from 'drizzle-orm';
 import { Router } from 'express';
 import multer from 'multer';
@@ -27,6 +28,13 @@ const IMAGE_MIMES = new Set([
   'image/avif',
 ]);
 
+/**
+ * The only two video mimes the client renders inline (<video>, browser-decodable
+ * everywhere we care about). Any other video/* stays kind 'file' — a download
+ * card, same as an unrecognized document.
+ */
+const VIDEO_MIMES = new Set(['video/mp4', 'video/webm']);
+
 const CHAT_NOT_FOUND = { error: 'Chat not found' };
 const NOT_FOUND = { error: 'Not found' };
 
@@ -40,6 +48,46 @@ function parseId(raw: unknown): number | null {
 function safeExt(originalName: string): string {
   const ext = path.extname(originalName).toLowerCase();
   return /^\.[a-z0-9]{1,12}$/.test(ext) ? ext : '';
+}
+
+/** Parsed outcome of a client `Range` header against a known file size. */
+type RangeResult = 'full' | 'unsatisfiable' | { start: number; end: number };
+
+/**
+ * Parses a single-range `Range: bytes=<start>-<end>` header (open-ended
+ * `bytes=100-` and suffix `bytes=-100` forms included) against `size`.
+ * Multipart ranges (comma-separated) are deliberately treated as 'full' —
+ * this endpoint only ever streams one range, so a multi-range request just
+ * gets the whole file rather than a real `multipart/byteranges` response.
+ * No header at all is also 'full'. Anything else that doesn't resolve to an
+ * in-bounds, non-empty range is 'unsatisfiable' (the caller sends 416).
+ */
+function parseRange(header: string | undefined, size: number): RangeResult {
+  if (!header) return 'full';
+  const raw = header.trim();
+  if (raw.includes(',')) return 'full';
+  const match = /^bytes=(\d*)-(\d*)$/.exec(raw);
+  if (!match) return 'unsatisfiable';
+  const [, startStr, endStr] = match;
+  if (startStr === '' && endStr === '') return 'unsatisfiable';
+
+  let start: number;
+  let end: number;
+  if (startStr === '') {
+    // Suffix range: the last N bytes.
+    const suffixLength = Number(endStr);
+    if (!Number.isFinite(suffixLength) || suffixLength <= 0) return 'unsatisfiable';
+    start = Math.max(0, size - suffixLength);
+    end = size - 1;
+  } else {
+    start = Number(startStr);
+    end = endStr === '' ? size - 1 : Number(endStr);
+  }
+
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || start > end || start >= size) {
+    return 'unsatisfiable';
+  }
+  return { start, end: Math.min(end, size - 1) };
 }
 
 /**
@@ -94,7 +142,13 @@ export function attachmentsRouter(db: Db, storage: Storage): Router {
         const decoded = Buffer.from(file.originalname, 'latin1').toString('utf8');
         const originalName = path.basename(decoded).slice(0, 200) || 'file';
 
-        let kind: 'image' | 'file' = IMAGE_MIMES.has(mimeType) ? 'image' : 'file';
+        // Videos get no thumbnail/dimensions (sharp never runs on them) — just
+        // the kind tag so the client knows to render an inline <video>.
+        let kind: AttachmentKind = IMAGE_MIMES.has(mimeType)
+          ? 'image'
+          : VIDEO_MIMES.has(mimeType)
+            ? 'video'
+            : 'file';
         let width: number | null = null;
         let height: number | null = null;
         let thumbName: string | null = null;
@@ -176,15 +230,19 @@ export function attachmentsRouter(db: Db, storage: Storage): Router {
       return;
     }
 
+    const kind: AttachmentKind = att.kind;
+
     const wantThumb = req.query.thumb === '1';
     const wantDownload = req.query.download === '1';
 
     // Thumb only exists for images; fall back to the full file when absent.
     const serveThumb = wantThumb && att.thumbPath !== null;
     const fileName = serveThumb ? att.thumbPath! : att.storagePath;
+    // Images and (the two safe) videos are served with their real mime so the
+    // browser renders them inline; anything else is an opaque download.
     const contentType = serveThumb
       ? 'image/webp'
-      : att.kind === 'image'
+      : kind === 'image' || kind === 'video'
         ? att.mimeType
         : 'application/octet-stream';
 
@@ -192,15 +250,47 @@ export function attachmentsRouter(db: Db, storage: Storage): Router {
     res.setHeader('Content-Security-Policy', 'sandbox');
     res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
     res.setHeader('Content-Type', contentType);
+    res.setHeader('Accept-Ranges', 'bytes');
     if (wantDownload) {
       const encoded = encodeURIComponent(att.originalName);
       res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encoded}`);
-    } else if (att.kind === 'file' && !serveThumb) {
+    } else if (kind === 'file' && !serveThumb) {
       // Never render an unknown/uploaded file inline.
       res.setHeader('Content-Disposition', 'attachment');
     }
 
-    const stream = storage.createReadStream(fileName);
+    let fileSize: number;
+    try {
+      fileSize = storage.size(fileName);
+    } catch {
+      res.removeHeader('Content-Type');
+      res.removeHeader('Content-Disposition');
+      res.removeHeader('Accept-Ranges');
+      res.status(404).json(NOT_FOUND);
+      return;
+    }
+
+    // Range support (required for video seeking — iOS Safari won't play video
+    // at all without it). A malformed or out-of-bounds Range -> 416; a valid
+    // one -> 206 with a genuinely partial fs stream (never buffered in memory).
+    const range = parseRange(req.headers.range, fileSize);
+    if (range === 'unsatisfiable') {
+      res.setHeader('Content-Range', `bytes */${fileSize}`);
+      res.status(416).end();
+      return;
+    }
+
+    let stream: ReturnType<typeof storage.createReadStream>;
+    if (range === 'full') {
+      res.setHeader('Content-Length', String(fileSize));
+      stream = storage.createReadStream(fileName);
+    } else {
+      res.status(206);
+      res.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${fileSize}`);
+      res.setHeader('Content-Length', String(range.end - range.start + 1));
+      stream = storage.createReadStream(fileName, range);
+    }
+
     stream.on('error', () => {
       if (!res.headersSent) {
         res.removeHeader('Content-Type');

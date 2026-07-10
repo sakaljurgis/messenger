@@ -54,7 +54,7 @@ function jsonResponse(status: number, body: unknown): Response {
 
 const me = { id: 1, email: 'me@example.com', displayName: 'Me', isBot: false };
 const users = [
-  { id: 2, email: 'bob@example.com', displayName: 'Bob', isBot: false },
+  { id: 2, email: 'bob@example.com', displayName: 'Bob', isBot: false, color: '#f44336' },
   { id: 3, email: 'echo@example.com', displayName: 'Echo Bot', isBot: true },
 ];
 
@@ -100,6 +100,29 @@ describe('UsersPage', () => {
     expect(screen.getByText('Bot')).toBeInTheDocument();
     // My own entry is pinned above the directory.
     expect(await screen.findByText('Notes to self')).toBeInTheDocument();
+  });
+
+  it("passes each user's color through to their Avatar", async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        if (input.toString().endsWith('/api/auth/me')) return jsonResponse(200, { user: me });
+        if (input.toString().endsWith('/api/users')) return jsonResponse(200, { users });
+        throw new Error(`Unexpected fetch: ${input}`);
+      }),
+    );
+
+    renderUsersPage();
+
+    const bobRow = (await screen.findByText('Bob')).closest('button')!;
+    const bobAvatar = bobRow.querySelector('[aria-hidden="true"]') as HTMLElement;
+    expect(bobAvatar.style.backgroundColor).toBe('rgb(244, 67, 54)');
+
+    // Echo Bot has no color set — falls back to the id-derived color, not Bob's.
+    const echoRow = screen.getByText('Echo Bot').closest('button')!;
+    const echoAvatar = echoRow.querySelector('[aria-hidden="true"]') as HTMLElement;
+    expect(echoAvatar.style.backgroundColor).not.toBe('rgb(244, 67, 54)');
+    expect(echoAvatar.style.backgroundColor).not.toBe('');
   });
 
   it('shows an online dot only for online users (bots never connect)', async () => {

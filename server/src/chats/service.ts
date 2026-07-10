@@ -5,8 +5,9 @@ import type {
   MessagesPage,
   ReactionGroupDTO,
   ReplyToDTO,
+  SearchResponse,
 } from '@messenger/shared';
-import { and, count, desc, eq, gt, inArray, isNull, lt, max, ne } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gt, inArray, isNull, lt, max, ne, sql } from 'drizzle-orm';
 import type { Db } from '../db/index.js';
 import {
   attachments,
@@ -18,6 +19,7 @@ import {
   users,
   type ChatRow,
   type MessageRow,
+  type UserRow,
 } from '../db/schema.js';
 import {
   toAttachmentDTO,
@@ -32,6 +34,10 @@ import type { Storage } from '../storage.js';
 /** Default and hard-cap page sizes for message history. */
 export const DEFAULT_MESSAGE_LIMIT = 50;
 export const MAX_MESSAGE_LIMIT = 100;
+
+/** Default and hard-cap page sizes for full-text search results. */
+export const DEFAULT_SEARCH_LIMIT = 30;
+export const MAX_SEARCH_LIMIT = 100;
 
 /**
  * Returns the chat row only if `userId` is a member of it. Undefined for both
@@ -694,6 +700,33 @@ export function listChatSummaries(db: Db, userId: number): ChatSummaryDTO[] {
 }
 
 /**
+ * Assembles full MessageDTOs for a batch of `{ message, sender }` rows, in the
+ * ORDER given (the batch loaders are order-independent; the final map preserves
+ * the caller's ordering). Shared by every list/window/search path so reactions,
+ * attachments, mentions and reply snapshots come through identically.
+ */
+function assembleMessageDTOs(
+  db: Db,
+  rows: { message: MessageRow; sender: UserRow }[],
+): MessageDTO[] {
+  const messageIds = rows.map((r) => r.message.id);
+  const mentionsByMessage = loadMentions(db, messageIds);
+  const attachmentsByMessage = loadAttachments(db, messageIds);
+  const reactionsByMessage = loadReactions(db, messageIds);
+  const replyByMessage = loadReplyTargets(db, rows.map((r) => r.message));
+  return rows.map((r) =>
+    toMessageDTO(
+      r.message,
+      r.sender,
+      mentionsByMessage.get(r.message.id) ?? [],
+      attachmentsByMessage.get(r.message.id) ?? [],
+      reactionsByMessage.get(r.message.id) ?? [],
+      replyByMessage.get(r.message.id) ?? null,
+    ),
+  );
+}
+
+/**
  * Cursor-paginated history: the newest `limit` messages with id < `before`
  * (or the newest overall when `before` is null), returned ascending (oldest
  * first) for direct rendering. `nextCursor` is the oldest returned id when
@@ -721,23 +754,183 @@ export function listMessages(
   const hasMore = rows.length > limit;
   const pageRows = hasMore ? rows.slice(0, limit) : rows;
   const ascending = [...pageRows].reverse();
-
-  const messageIds = ascending.map((r) => r.message.id);
-  const mentionsByMessage = loadMentions(db, messageIds);
-  const attachmentsByMessage = loadAttachments(db, messageIds);
-  const reactionsByMessage = loadReactions(db, messageIds);
-  const replyByMessage = loadReplyTargets(db, ascending.map((r) => r.message));
-  const dtos = ascending.map((r) =>
-    toMessageDTO(
-      r.message,
-      r.sender,
-      mentionsByMessage.get(r.message.id) ?? [],
-      attachmentsByMessage.get(r.message.id) ?? [],
-      reactionsByMessage.get(r.message.id) ?? [],
-      replyByMessage.get(r.message.id) ?? null,
-    ),
-  );
+  const dtos = assembleMessageDTOs(db, ascending);
 
   const oldest = ascending[0]?.message.id ?? null;
   return { messages: dtos, nextCursor: hasMore ? oldest : null };
+}
+
+/**
+ * Forward pagination: the OLDEST `limit` messages strictly newer than `after`
+ * (id > after), returned ascending — the newer-page complement of `before`, so
+ * a client that jumped into history can walk toward the present. `newerCursor`
+ * is the newest returned id when yet-newer messages remain (else null, meaning
+ * the page reaches the present). `nextCursor` points back at the oldest returned
+ * id whenever the page is non-empty (there is always older history — at minimum
+ * the `after` cursor itself), so the client can also page backwards.
+ */
+export function listMessagesAfter(
+  db: Db,
+  chatId: number,
+  after: number,
+  limit: number,
+): MessagesPage {
+  // Fetch one extra (asc) to detect whether a still-newer page exists.
+  const rows = db
+    .select({ message: messages, sender: users })
+    .from(messages)
+    .innerJoin(users, eq(users.id, messages.senderId))
+    .where(and(eq(messages.chatId, chatId), gt(messages.id, after)))
+    .orderBy(asc(messages.id))
+    .limit(limit + 1)
+    .all();
+
+  const hasNewer = rows.length > limit;
+  const pageRows = hasNewer ? rows.slice(0, limit) : rows;
+  const dtos = assembleMessageDTOs(db, pageRows);
+
+  const oldest = pageRows[0]?.message.id ?? null;
+  const newest = pageRows.at(-1)?.message.id ?? null;
+  return {
+    messages: dtos,
+    nextCursor: oldest,
+    newerCursor: hasNewer ? newest : null,
+  };
+}
+
+/**
+ * A window of history centred on `messageId`: roughly half `limit` older
+ * messages, the target itself, and roughly half newer, returned ascending.
+ * Returns null when the message isn't in this chat (the route turns that into a
+ * 404 — same no-existence-leak rule as non-member access). `nextCursor` is the
+ * oldest id in the window when older messages remain (else null); `newerCursor`
+ * the newest id when newer remain (else null) — so the window can be extended in
+ * either direction. Tombstones are included as tombstone DTOs, exactly as the
+ * plain history endpoint renders them.
+ */
+export function listMessagesAround(
+  db: Db,
+  chatId: number,
+  messageId: number,
+  limit: number,
+): MessagesPage | null {
+  const target = db
+    .select({ message: messages, sender: users })
+    .from(messages)
+    .innerJoin(users, eq(users.id, messages.senderId))
+    .where(and(eq(messages.id, messageId), eq(messages.chatId, chatId)))
+    .get();
+  if (!target) return null;
+
+  // Reserve one slot for the target; split the rest older/newer.
+  const olderLimit = Math.floor(limit / 2);
+  const newerLimit = Math.max(limit - olderLimit - 1, 0);
+
+  // Older half: id < target, newest-first, one extra to detect more.
+  const olderRows = db
+    .select({ message: messages, sender: users })
+    .from(messages)
+    .innerJoin(users, eq(users.id, messages.senderId))
+    .where(and(eq(messages.chatId, chatId), lt(messages.id, messageId)))
+    .orderBy(desc(messages.id))
+    .limit(olderLimit + 1)
+    .all();
+  const hasOlder = olderRows.length > olderLimit;
+  const olderAscending = (hasOlder ? olderRows.slice(0, olderLimit) : olderRows).reverse();
+
+  // Newer half: id > target, oldest-first, one extra to detect more.
+  const newerRows = db
+    .select({ message: messages, sender: users })
+    .from(messages)
+    .innerJoin(users, eq(users.id, messages.senderId))
+    .where(and(eq(messages.chatId, chatId), gt(messages.id, messageId)))
+    .orderBy(asc(messages.id))
+    .limit(newerLimit + 1)
+    .all();
+  const hasNewer = newerRows.length > newerLimit;
+  const newerAscending = hasNewer ? newerRows.slice(0, newerLimit) : newerRows;
+
+  const windowRows = [...olderAscending, target, ...newerAscending];
+  const dtos = assembleMessageDTOs(db, windowRows);
+  return {
+    messages: dtos,
+    nextCursor: hasOlder ? windowRows[0]!.message.id : null,
+    newerCursor: hasNewer ? windowRows.at(-1)!.message.id : null,
+  };
+}
+
+/**
+ * Turns raw user search input into a safe FTS5 MATCH expression. Each
+ * whitespace-separated term becomes a double-quoted prefix token (`"term"*`) so
+ * that FTS5 operators and syntax in the input — `-` (NOT), `NEAR`, `AND`/`OR`,
+ * `:` column filters, quotes, parens, `*` — are treated as literal text and can
+ * never error or change the query's meaning. Embedded double quotes are stripped
+ * (they'd break the quoting); a term that reduces to nothing is dropped. Returns
+ * '' when no usable terms remain (the caller then returns an empty result set
+ * rather than running a bare/empty MATCH).
+ */
+export function sanitizeFtsQuery(raw: string): string {
+  const terms = raw
+    .trim()
+    .split(/\s+/)
+    .map((t) => t.replace(/"/g, ''))
+    .filter((t) => t.length > 0);
+  if (terms.length === 0) return '';
+  return terms.map((t) => `"${t}"*`).join(' ');
+}
+
+/**
+ * Full-text search over message content (FTS5), scoped to chats the user is a
+ * MEMBER of and excluding tombstones, newest-first. The membership join and the
+ * `deleted_at IS NULL` filter live in the SQL itself so a non-member's — or a
+ * deleted message's — content can never leak, regardless of what the FTS index
+ * happens to hold (soft-delete leaves the original text in the DB and thus in
+ * the index; only this query hides it). `before` is the same cursor convention
+ * as {@link listMessages}: `nextCursor` is the oldest (smallest-id) match on the
+ * page when older matches remain, else null. Hostile input is neutralised by
+ * {@link sanitizeFtsQuery}; an all-punctuation query yields an empty result set.
+ */
+export function searchMessages(
+  db: Db,
+  userId: number,
+  rawQuery: string,
+  before: number | null,
+  limit: number,
+): SearchResponse {
+  const match = sanitizeFtsQuery(rawQuery);
+  if (match === '') return { messages: [], nextCursor: null };
+
+  const beforeClause = before !== null ? sql`AND m.id < ${before}` : sql``;
+  // Fetch one extra to detect whether an older page of matches exists. Only ids
+  // are read here; full rows + DTO assembly reuse the shared batch loaders.
+  const idRows = db.all(sql`
+    SELECT m.id AS id
+    FROM messages_fts
+    JOIN messages m ON m.id = messages_fts.rowid
+    JOIN chat_members cm ON cm.chat_id = m.chat_id AND cm.user_id = ${userId}
+    WHERE messages_fts MATCH ${match}
+      AND m.deleted_at IS NULL
+      ${beforeClause}
+    ORDER BY m.id DESC
+    LIMIT ${limit + 1}
+  `) as { id: number }[];
+
+  const hasMore = idRows.length > limit;
+  const pageIds = (hasMore ? idRows.slice(0, limit) : idRows).map((r) => r.id);
+  if (pageIds.length === 0) return { messages: [], nextCursor: null };
+
+  // Reorder the fetched rows back into the id DESC (newest-first) match order.
+  const rowById = new Map(
+    db
+      .select({ message: messages, sender: users })
+      .from(messages)
+      .innerJoin(users, eq(users.id, messages.senderId))
+      .where(inArray(messages.id, pageIds))
+      .all()
+      .map((r) => [r.message.id, r] as const),
+  );
+  const orderedRows = pageIds.map((id) => rowById.get(id)!);
+  const dtos = assembleMessageDTOs(db, orderedRows);
+
+  return { messages: dtos, nextCursor: hasMore ? pageIds[pageIds.length - 1]! : null };
 }

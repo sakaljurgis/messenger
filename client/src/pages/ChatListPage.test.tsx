@@ -79,16 +79,32 @@ const chats: ChatSummaryDTO[] = [
   { id: 11, type: 'group', name: 'Team', members: [me, bob, carol], lastMessage: msg(6, me, 'Hello all'), unreadCount: 0 },
 ];
 
-function stubFetch(chatList: ChatSummaryDTO[]) {
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(async (input: RequestInfo | URL) => {
-      const url = input.toString();
-      if (url.endsWith('/api/auth/me')) return jsonResponse(200, { user: me });
-      if (url.endsWith('/api/chats')) return jsonResponse(200, { chats: chatList });
-      throw new Error(`Unexpected fetch: ${url}`);
-    }),
-  );
+/** Config for the mocked GET /api/search endpoint. `before=` requests return
+ *  `morePage` (the older page); the first request returns `messages`. */
+interface SearchStub {
+  messages: MessageDTO[];
+  nextCursor?: number | null;
+  morePage?: MessageDTO[];
+}
+
+function stubFetch(chatList: ChatSummaryDTO[], search?: SearchStub) {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const url = input.toString();
+    if (url.endsWith('/api/auth/me')) return jsonResponse(200, { user: me });
+    if (url.endsWith('/api/chats')) return jsonResponse(200, { chats: chatList });
+    if (url.includes('/api/search')) {
+      if (url.includes('before=')) {
+        return jsonResponse(200, { messages: search?.morePage ?? [], nextCursor: null });
+      }
+      return jsonResponse(200, {
+        messages: search?.messages ?? [],
+        nextCursor: search?.nextCursor ?? null,
+      });
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  return fetchMock;
 }
 
 function renderChatList() {
@@ -266,5 +282,83 @@ describe('ChatListPage', () => {
     expect(await screen.findByText('📷 Photo')).toBeInTheDocument();
     // "You:" prefix logic still applies for my own attachment message.
     expect(screen.getByText('You: 📷 Photo')).toBeInTheDocument();
+  });
+
+  describe('message search', () => {
+    // A search hit lives in the group chat (id 11) so the result's chat title
+    // ('Team') is distinct from its sender ('Bob').
+    const hit: MessageDTO = { ...msg(50, bob, 'hello there world'), chatId: 11 };
+
+    it('debounces, then renders result rows with chat title, sender and a highlighted snippet', async () => {
+      const fetchMock = stubFetch(chats, { messages: [hit] });
+      renderChatList();
+      await screen.findByText('Bob'); // chat list is up first
+
+      await userEvent.type(screen.getByLabelText('Search messages'), 'world');
+
+      // The result row appears once the debounced request resolves.
+      await screen.findByText('Team'); // chat title on the result row
+      expect(screen.getByText('Bob')).toBeInTheDocument(); // sender line
+
+      // The matched term is wrapped in a <mark>; the rest of the snippet isn't.
+      const mark = screen.getByText('world');
+      expect(mark.tagName).toBe('MARK');
+      expect(screen.getByText('hello there')).toBeInTheDocument();
+
+      // Exactly one search request fired despite five keystrokes (debounced).
+      const searchCalls = fetchMock.mock.calls.filter(([i]) =>
+        i.toString().includes('/api/search'),
+      );
+      expect(searchCalls).toHaveLength(1);
+      expect(searchCalls[0]?.[0].toString()).toContain('q=world');
+    });
+
+    it('links a result to the chat focused on the message (?message=)', async () => {
+      stubFetch(chats, { messages: [hit] });
+      renderChatList();
+      await userEvent.type(screen.getByLabelText('Search messages'), 'world');
+
+      const snippet = await screen.findByText('world');
+      const link = snippet.closest('a');
+      expect(link?.getAttribute('href')).toBe('/chats/11?message=50');
+    });
+
+    it('shows an empty state when nothing matches', async () => {
+      stubFetch(chats, { messages: [] });
+      renderChatList();
+      await userEvent.type(screen.getByLabelText('Search messages'), 'nope');
+
+      expect(await screen.findByText('No messages found')).toBeInTheDocument();
+    });
+
+    it('loads more results via the nextCursor', async () => {
+      const more: MessageDTO = { ...msg(40, bob, 'another world hit'), chatId: 11 };
+      const fetchMock = stubFetch(chats, { messages: [hit], nextCursor: 50, morePage: [more] });
+      renderChatList();
+      await userEvent.type(screen.getByLabelText('Search messages'), 'world');
+
+      await screen.findByText('hello there');
+      await userEvent.click(screen.getByRole('button', { name: 'Load more' }));
+
+      expect(await screen.findByText('another')).toBeInTheDocument();
+      const moreCall = fetchMock.mock.calls.find(([i]) =>
+        i.toString().includes('/api/search') && i.toString().includes('before=50'),
+      );
+      expect(moreCall).toBeDefined();
+    });
+
+    it('clearing the query restores the normal chat list', async () => {
+      stubFetch(chats, { messages: [hit] });
+      renderChatList();
+      await userEvent.type(screen.getByLabelText('Search messages'), 'world');
+      await screen.findByText('Team');
+
+      await userEvent.click(screen.getByLabelText('Clear search'));
+
+      // Back to the chat list: the DM row (previewing its last message) returns,
+      // and the "No messages found" / result rows are gone.
+      expect(await screen.findByText('Hey there')).toBeInTheDocument();
+      expect(screen.queryByText('hello there')).not.toBeInTheDocument();
+    });
   });
 });

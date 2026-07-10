@@ -15,7 +15,14 @@ export interface Storage {
   dir: string;
   /** Absolute path of a stored file by its name. */
   filePath(name: string): string;
-  createReadStream(name: string): fs.ReadStream;
+  /**
+   * A read stream for the whole file, or just the inclusive `[start, end]`
+   * byte range when `range` is given — HTTP Range support for the serving
+   * endpoint (video seeking; iOS Safari refuses to play video without it).
+   */
+  createReadStream(name: string, range?: { start: number; end: number }): fs.ReadStream;
+  /** Byte size of a stored file; throws (like fs.statSync) when it's missing. */
+  size(name: string): number;
   /** Delete a stored file; tolerant of a name that no longer exists on disk. */
   remove(name: string): void;
   /** Create the backing directory (idempotent); call once on boot. */
@@ -31,7 +38,9 @@ export function createStorage(
   return {
     dir: root,
     filePath: resolve,
-    createReadStream: (name) => fs.createReadStream(resolve(name)),
+    createReadStream: (name, range) =>
+      fs.createReadStream(resolve(name), range ? { start: range.start, end: range.end } : undefined),
+    size: (name) => fs.statSync(resolve(name)).size,
     remove(name) {
       try {
         fs.rmSync(resolve(name), { force: true });

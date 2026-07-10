@@ -7,9 +7,20 @@ import type { Db } from '../db/index.js';
 import { users } from '../db/schema.js';
 import { toUserDTO } from '../dto.js';
 
+/** '#rrggbb', case-insensitive (normalized to lowercase before storage). */
+const HEX_COLOR_RE = /^#[0-9a-f]{6}$/i;
+
 // Mirrors registerSchema's rules (auth.ts) for the fields that can change.
+// `color`: omit to leave unchanged, null to revert to the id-derived default,
+// or a '#rrggbb' hex string (normalized to lowercase).
 const updateProfileSchema = z.object({
   displayName: z.string().trim().min(1).max(100),
+  color: z
+    .string()
+    .regex(HEX_COLOR_RE, 'Color must be a hex value like #a1b2c3')
+    .transform((c) => c.toLowerCase())
+    .nullable()
+    .optional(),
 });
 const changePasswordSchema = z.object({
   currentPassword: z.string().min(1),
@@ -37,16 +48,24 @@ export function usersRouter(db: Db): Router {
     res.status(200).json({ users: rows.map(toUserDTO) });
   });
 
-  // PATCH /api/users/me — update own profile (display name).
+  // PATCH /api/users/me — update own profile (display name, accent color).
+  // `color` omitted -> unchanged; null -> revert to the id-derived default;
+  // '#rrggbb' -> set (validated + lowercased above).
   router.patch('/me', requireAuth, (req, res) => {
     const parsed = updateProfileSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: firstIssue(parsed.error) });
       return;
     }
+    const update: { displayName: string; color?: string | null } = {
+      displayName: parsed.data.displayName,
+    };
+    if ('color' in parsed.data) {
+      update.color = parsed.data.color;
+    }
     const updated = db
       .update(users)
-      .set({ displayName: parsed.data.displayName })
+      .set(update)
       .where(eq(users.id, req.user!.id))
       .returning()
       .get();

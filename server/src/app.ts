@@ -9,6 +9,7 @@ import { botApiRouter } from './routes/bot-api.js';
 import { botsRouter } from './routes/bots.js';
 import { chatsRouter } from './routes/chats.js';
 import { pushRouter } from './routes/push.js';
+import { searchRouter } from './routes/search.js';
 import { usersRouter } from './routes/users.js';
 import { createStorage, type Storage } from './storage.js';
 
@@ -46,6 +47,7 @@ export function createApp(
   app.use('/api/push', pushRouter(db));
   app.use('/api/bots', botsRouter(db, events));
   app.use('/api/bot', botApiRouter(db, events));
+  app.use('/api/search', searchRouter(db));
   // Attachments: upload (POST /api/chats/:chatId/attachments) + serve
   // (GET /api/attachments/:id). Mounted at /api so it owns both path shapes;
   // the chats router above never matches these, so order is unambiguous.

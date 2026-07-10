@@ -26,15 +26,20 @@ interface AvatarProps {
   className?: string;
   /** When true, overlays a small green online dot at the bottom-right. */
   online?: boolean;
+  /**
+   * User-picked accent color ('#rrggbb'), when set it wins; null/undefined
+   * falls back to the id-derived color exactly as before.
+   */
+  color?: string | null;
 }
 
 /** Colored circle with up to two white initials, plus an optional online dot. Decorative (aria-hidden). */
-export default function Avatar({ name, id, size = 'md', className = '', online = false }: AvatarProps) {
+export default function Avatar({ name, id, size = 'md', className = '', online = false, color }: AvatarProps) {
   const hue = avatarHue(id);
   return (
     <div
       className={`relative flex flex-shrink-0 items-center justify-center rounded-full font-semibold text-white ${sizeClasses[size]} ${className}`}
-      style={{ backgroundColor: `hsl(${hue} 70% 45%)` }}
+      style={{ backgroundColor: color ?? `hsl(${hue} 70% 45%)` }}
       aria-hidden="true"
     >
       {chatInitials(name)}

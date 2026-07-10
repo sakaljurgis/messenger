@@ -8,6 +8,11 @@ export interface UserDTO {
   email: string;
   displayName: string;
   isBot: boolean;
+  /**
+   * User-picked accent color as '#rrggbb' for their avatar/name badge, or
+   * null/absent → the client derives a stable color from the user id.
+   */
+  color?: string | null;
 }
 
 /** A chat member, personalized with their own read position in that chat. */
@@ -18,7 +23,12 @@ export interface ChatMemberDTO extends UserDTO {
 
 export type ChatType = 'dm' | 'group';
 
-export type AttachmentKind = 'image' | 'file';
+/**
+ * 'video' is assigned only to browser-safe types (video/mp4, video/webm),
+ * which the client renders inline via <video> (served with Range support);
+ * any other video/* mime stays 'file' (a download card).
+ */
+export type AttachmentKind = 'image' | 'video' | 'file';
 
 /** The fixed palette of emoji a message may be reacted with. */
 export const REACTION_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🙏'] as const;
@@ -158,6 +168,11 @@ export interface MarkReadRequest {
 export interface UpdateProfileRequest {
   /** Trimmed, 1–100 chars (same rule as registration). */
   displayName: string;
+  /**
+   * Accent color as '#rrggbb' (validated server-side), or null to revert to
+   * the id-derived default. Omit to leave unchanged.
+   */
+  color?: string | null;
 }
 
 /** PUT /api/users/me/password — change own password (204 on success). */
@@ -176,6 +191,22 @@ export interface AuthResponse {
 export interface MessagesPage {
   messages: MessageDTO[];
   /** Pass as ?before= to fetch the next (older) page; null when exhausted. */
+  nextCursor: number | null;
+  /**
+   * Pass as ?after= to fetch the next (newer) page; null when already at the
+   * newest message. Only present on windowed fetches (?around= / ?after=) —
+   * the default newest-page fetch omits it (there is nothing newer).
+   */
+  newerCursor?: number | null;
+}
+
+/**
+ * GET /api/search?q=<terms>&before=<cursor> — full-text search (FTS5) over
+ * messages in MY chats only, newest first, tombstones excluded. Same cursor
+ * convention as MessagesPage.
+ */
+export interface SearchResponse {
+  messages: MessageDTO[];
   nextCursor: number | null;
 }
 

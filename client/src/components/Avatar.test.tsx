@@ -23,3 +23,29 @@ describe('Avatar presence dot', () => {
     expect(getByTestId('presence-dot').className).toContain('h-3.5');
   });
 });
+
+describe('Avatar color', () => {
+  it('derives a color from the id when no color prop is given', () => {
+    const { container: c1 } = render(<Avatar name="Bob" id={2} />);
+    const { container: c2 } = render(<Avatar name="Bob" id={99} />);
+    const bg1 = (c1.firstChild as HTMLElement).style.backgroundColor;
+    const bg2 = (c2.firstChild as HTMLElement).style.backgroundColor;
+    expect(bg1).not.toBe('');
+    // Different ids derive different colors — proves it's id-based, not fixed.
+    expect(bg1).not.toBe(bg2);
+  });
+
+  it('falls back to the id-derived color when color is null (no visual change)', () => {
+    const { container: withNull } = render(<Avatar name="Bob" id={2} color={null} />);
+    const { container: withoutProp } = render(<Avatar name="Bob" id={2} />);
+    expect((withNull.firstChild as HTMLElement).style.backgroundColor).toBe(
+      (withoutProp.firstChild as HTMLElement).style.backgroundColor,
+    );
+  });
+
+  it('uses the provided color when set, overriding the derived color', () => {
+    const { container } = render(<Avatar name="Bob" id={2} color="#ff8800" />);
+    const circle = container.firstChild as HTMLElement;
+    expect(circle.style.backgroundColor).toBe('rgb(255, 136, 0)');
+  });
+});

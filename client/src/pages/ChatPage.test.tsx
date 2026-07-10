@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import type { AttachmentDTO, ChatMemberDTO, ChatSummaryDTO, MessageDTO, UserDTO } from '@messenger/shared';
+import type { AttachmentDTO, ChatMemberDTO, ChatSummaryDTO, MessageDTO, MessagesPage, UserDTO } from '@messenger/shared';
 import ChatPage from './ChatPage';
 import { AuthProvider } from '../lib/auth';
 import { formatBytes } from '../lib/attachments';
@@ -89,6 +89,12 @@ function stubFetch(options: {
   chat?: ChatSummaryDTO;
   /** Directory returned by GET /api/users (for the group-info add-members picker). */
   users?: UserDTO[];
+  /** nextCursor for the default (newest / ?before=) page — defaults to null. */
+  nextCursor?: number | null;
+  /** GET /messages?around=<id> — the centred window (both cursors). */
+  onAround?: (id: number) => MessagesPage;
+  /** GET /messages?after=<cursor> — the next newer page (newerCursor null at the edge). */
+  onAfter?: (cursor: number) => MessagesPage;
   onPost?: (body: unknown) => MessageDTO;
   onPatch?: (body: { content: string; mentions?: number[] }, id: number) => MessageDTO;
   /** POST /messages/:id/reactions — return the updated message for the toggled emoji. */
@@ -114,7 +120,17 @@ function stubFetch(options: {
       return jsonResponse(200, { message });
     }
     if (url.includes('/messages') && method === 'GET') {
-      return jsonResponse(200, { messages: options.messages, nextCursor: null });
+      const params = new URL(url, 'http://localhost').searchParams;
+      const around = params.get('around');
+      const after = params.get('after');
+      if (around != null && options.onAround) {
+        return jsonResponse(200, options.onAround(Number(around)));
+      }
+      if (after != null && options.onAfter) {
+        return jsonResponse(200, options.onAfter(Number(after)));
+      }
+      // Default (newest page or ?before=): the contract omits newerCursor here.
+      return jsonResponse(200, { messages: options.messages, nextCursor: options.nextCursor ?? null });
     }
     if (url.includes('/messages') && method === 'POST') {
       const body = JSON.parse(init?.body as string);
@@ -149,6 +165,19 @@ function imageAttachment(id: number, name = 'photo.jpg'): AttachmentDTO {
     width: 800,
     height: 600,
     hasThumb: true,
+  };
+}
+
+function videoAttachment(id: number, name = 'clip.mp4'): AttachmentDTO {
+  return {
+    id,
+    kind: 'video',
+    originalName: name,
+    mimeType: 'video/mp4',
+    sizeBytes: 500_000,
+    width: null,
+    height: null,
+    hasThumb: false,
   };
 }
 
@@ -187,9 +216,9 @@ function scrollAwayFromBottom(scrollEl: HTMLElement) {
   fireEvent.scroll(scrollEl);
 }
 
-function renderChatPage() {
+function renderChatPage(entry = '/chats/10') {
   return render(
-    <MemoryRouter initialEntries={['/chats/10']}>
+    <MemoryRouter initialEntries={[entry]}>
       <AuthProvider>
         <Routes>
           <Route path="/chats/:id" element={<ChatPage />} />
@@ -210,8 +239,9 @@ describe('ChatPage', () => {
     stubFetch({ messages: [msg(1, bob, 'Hi from Bob'), msg(2, me, 'Hi from me')] });
     renderChatPage();
 
-    const theirs = await screen.findByText('Hi from Bob');
-    const mine = screen.getByText('Hi from me');
+    // The text sits inside the markdown renderer's <p>; climb to the bubble div.
+    const theirs = (await screen.findByText('Hi from Bob')).closest('.rounded-2xl') as HTMLElement;
+    const mine = screen.getByText('Hi from me').closest('.rounded-2xl') as HTMLElement;
 
     expect(theirs.className).toContain('bg-gray-200');
     expect(mine.className).toContain('bg-[#0084ff]');
@@ -297,6 +327,35 @@ describe('ChatPage', () => {
     // Escape closes it.
     await userEvent.keyboard('{Escape}');
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('renders a video attachment as an inline <video> with controls', async () => {
+    const vidMsg: MessageDTO = { ...msg(1, bob, ''), attachments: [videoAttachment(77)] };
+    stubFetch({ messages: [vidMsg] });
+    renderChatPage();
+
+    const video = await screen.findByTestId('video-attachment');
+    expect(video.tagName).toBe('VIDEO');
+    expect(video.getAttribute('src')).toBe('/api/attachments/77');
+    expect(video.hasAttribute('controls')).toBe(true);
+    expect(video.hasAttribute('playsinline')).toBe(true);
+  });
+
+  it('renders a video as its own block, never inside the image grid', async () => {
+    const mixedMsg: MessageDTO = {
+      ...msg(1, bob, ''),
+      attachments: [imageAttachment(42), imageAttachment(43), videoAttachment(77)],
+    };
+    stubFetch({ messages: [mixedMsg] });
+    const { container } = renderChatPage();
+
+    const video = await screen.findByTestId('video-attachment');
+    expect(video.closest('.grid')).toBeNull();
+
+    const grid = container.querySelector('.grid');
+    expect(grid).not.toBeNull();
+    expect(grid?.querySelectorAll('img')).toHaveLength(2);
+    expect(grid?.querySelector('video')).toBeNull();
   });
 
   it('renders a file attachment as a download card with name and size', async () => {
@@ -553,6 +612,33 @@ describe('ChatPage', () => {
     // Tap (mobile has no hover): the name appears on the avatar's own row too.
     await userEvent.click(avatarButton);
     expect(screen.getAllByText('Bob')).toHaveLength(2);
+  });
+
+  it('renders message content as markdown (bold, safe links) inside the bubble', async () => {
+    stubFetch({
+      messages: [msg(1, bob, 'this is **important** and [a link](https://example.com)')],
+    });
+    renderChatPage();
+
+    const strong = await screen.findByText('important');
+    expect(strong.tagName).toBe('STRONG');
+    expect(strong.closest('.rounded-2xl')?.className).toContain('bg-gray-200');
+
+    const link = screen.getByRole('link', { name: 'a link' });
+    expect(link).toHaveAttribute('href', 'https://example.com');
+    expect(link).toHaveAttribute('target', '_blank');
+  });
+
+  it("group: sender name label carries the sender's accent color", async () => {
+    const coloredBob: ChatMemberDTO = { ...bob, color: '#ab12cd' };
+    const group: ChatSummaryDTO = {
+      id: 10, type: 'group', name: 'Team', members: [me, coloredBob], lastMessage: null, unreadCount: 0,
+    };
+    stubFetch({ messages: [msg(1, coloredBob, 'hi team')], chat: group });
+    renderChatPage();
+
+    const label = await screen.findByText('Bob');
+    expect(label).toHaveStyle({ color: '#ab12cd' });
   });
 
   it('group info: lists members and PATCHes newly added ones', async () => {
@@ -1148,6 +1234,161 @@ describe('ChatPage', () => {
       await waitFor(() =>
         expect(screen.queryByLabelText('Jump to latest messages')).not.toBeInTheDocument(),
       );
+    });
+  });
+
+  describe('focus mode (windowed history, jump-to-message)', () => {
+    // A five-message window centred on id 3, with more history beyond it in both
+    // directions (nextCursor older, newerCursor newer → not at the live edge).
+    const window: MessageDTO[] = [
+      msg(1, bob, 'first'),
+      msg(2, me, 'second'),
+      msg(3, bob, 'target message'),
+      msg(4, me, 'fourth'),
+      msg(5, bob, 'fifth'),
+    ];
+    const windowPage: MessagesPage = { messages: window, nextCursor: null, newerCursor: 5 };
+    // The next newer page reaches the present (newerCursor null → live edge).
+    const newerPage: MessagesPage = {
+      messages: [msg(6, me, 'sixth'), msg(7, bob, 'seventh')],
+      nextCursor: 4,
+      newerCursor: null,
+    };
+
+    it('opens a window around ?message=, fetching around=, centring + flashing it, with no unread divider', async () => {
+      // Default `me` fixture has lastReadMessageId 0, so a NORMAL open of this
+      // window would show an unread divider before bob's first message — focus
+      // mode must not.
+      const fetchMock = stubFetch({ messages: [], onAround: () => windowPage, onAfter: () => newerPage });
+      renderChatPage('/chats/10?message=3');
+
+      await screen.findByText('target message');
+
+      const aroundCall = fetchMock.mock.calls.find(
+        ([i, init]) => i.toString().includes('around=3') && (init?.method ?? 'GET') === 'GET',
+      );
+      expect(aroundCall).toBeDefined();
+
+      // The target is flashed with the existing highlight treatment.
+      await waitFor(() =>
+        expect(document.getElementById('message-3')?.className).toContain('bg-[#0084ff]/10'),
+      );
+
+      // No unread divider in a windowed open, and a "Load newer" affordance is
+      // present (the window hasn't reached the present).
+      expect(screen.queryByRole('separator', { name: 'New messages' })).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Load newer' })).toBeInTheDocument();
+    });
+
+    it('pages forward with "Load newer" until it reaches the live edge', async () => {
+      stubFetch({ messages: [], onAround: () => windowPage, onAfter: () => newerPage });
+      renderChatPage('/chats/10?message=3');
+
+      await screen.findByText('target message');
+      expect(screen.getByText('fifth')).toBeInTheDocument();
+
+      await userEvent.click(screen.getByRole('button', { name: 'Load newer' }));
+
+      // Newer messages appended; now at the live edge, so the affordance is gone.
+      expect(await screen.findByText('seventh')).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Load newer' })).not.toBeInTheDocument();
+    });
+
+    it('suppresses a live message:new while windowed but counts it, appending once back at the live edge', async () => {
+      stubFetch({ messages: [], onAround: () => windowPage, onAfter: () => newerPage });
+      renderChatPage('/chats/10?message=3');
+
+      await screen.findByText('target message');
+
+      // A live message must NOT be spliced into the middle of old history...
+      await emitFromServer('message:new', msg(20, bob, 'live while windowed'));
+      expect(screen.queryByText('live while windowed')).not.toBeInTheDocument();
+      // ...but it drives the jump-to-bottom pill's "N new" count.
+      expect(await screen.findByText('1 new')).toBeInTheDocument();
+
+      // Page forward to the present.
+      await userEvent.click(screen.getByRole('button', { name: 'Load newer' }));
+      await screen.findByText('seventh');
+
+      // At the live edge, appends resume: a further live message shows up.
+      await emitFromServer('message:new', msg(21, bob, 'live at edge'));
+      expect(await screen.findByText('live at edge')).toBeInTheDocument();
+    });
+
+    it('marks read only once at the live edge, never from the middle of the window', async () => {
+      const fetchMock = stubFetch({ messages: [], onAround: () => windowPage, onAfter: () => newerPage });
+      renderChatPage('/chats/10?message=3');
+
+      await screen.findByText('target message');
+      // Let effects flush; while windowed, no read marker is POSTed.
+      await waitFor(() =>
+        expect(
+          fetchMock.mock.calls.some(([i]) => i.toString().includes('around=3')),
+        ).toBe(true),
+      );
+      expect(fetchMock.mock.calls.filter(([i]) => i.toString().includes('/read'))).toHaveLength(0);
+
+      // Reaching the live edge triggers the mark-read.
+      await userEvent.click(screen.getByRole('button', { name: 'Load newer' }));
+      await screen.findByText('seventh');
+      await waitFor(() =>
+        expect(fetchMock.mock.calls.some(([i]) => i.toString().includes('/read'))).toBe(true),
+      );
+    });
+
+    it('jump-to-bottom pill resets a windowed view to the live newest window (refetch)', async () => {
+      const fetchMock = stubFetch({
+        messages: [msg(8, me, 'newest live message')], // the default newest page
+        onAround: () => windowPage,
+        onAfter: () => newerPage,
+      });
+      renderChatPage('/chats/10?message=3');
+
+      await screen.findByText('target message');
+      // The pill is visible in a windowed view (there are messages beyond it).
+      const pill = await screen.findByLabelText('Jump to latest messages');
+
+      await userEvent.click(pill);
+
+      // Dropping the focus param refetches the newest page: the live message
+      // replaces the old window.
+      expect(await screen.findByText('newest live message')).toBeInTheDocument();
+      expect(screen.queryByText('target message')).not.toBeInTheDocument();
+      // A default (no around/after) GET fired for the reset.
+      expect(
+        fetchMock.mock.calls.some(
+          ([i, init]) =>
+            i.toString().includes('/messages') &&
+            (init?.method ?? 'GET') === 'GET' &&
+            !i.toString().includes('around=') &&
+            !i.toString().includes('after='),
+        ),
+      ).toBe(true);
+    });
+
+    it('reply-jump falls back to focus mode when the quoted original is not loaded', async () => {
+      const replyMsg: MessageDTO = {
+        ...msg(10, me, 'my reply'),
+        replyTo: { id: 1, senderId: bob.id, content: 'orig', isDeleted: false, hasAttachments: false },
+      };
+      // Newest page: only the reply — the original (id 1) is far up the history.
+      const fetchMock = stubFetch({
+        messages: [replyMsg],
+        onAround: () => ({
+          messages: [msg(1, bob, 'the original message body'), msg(2, me, 'x'), replyMsg],
+          nextCursor: null,
+          newerCursor: null,
+        }),
+      });
+      renderChatPage();
+
+      await screen.findByText('my reply');
+
+      // Tapping the quote can't scroll (original not loaded) → focus-mode fallback.
+      await userEvent.click(screen.getByRole('button', { name: 'Replying to Bob' }));
+
+      expect(await screen.findByText('the original message body')).toBeInTheDocument();
+      expect(fetchMock.mock.calls.some(([i]) => i.toString().includes('around=1'))).toBe(true);
     });
   });
 });

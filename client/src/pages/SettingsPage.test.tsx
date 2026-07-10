@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import type { UserDTO } from '@messenger/shared';
@@ -163,6 +163,83 @@ describe('SettingsPage — profile', () => {
 
     const link = await screen.findByRole('link', { name: /manage bots/i });
     expect(link).toHaveAttribute('href', '/bots');
+  });
+});
+
+describe('SettingsPage — color', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.clearAllMocks();
+  });
+
+  function renderWithFetch(fetchMock: typeof fetch) {
+    vi.stubGlobal('fetch', fetchMock);
+    render(
+      <MemoryRouter initialEntries={['/settings']}>
+        <AuthProvider>
+          <Routes>
+            <Route path="/settings" element={<SettingsPage />} />
+          </Routes>
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+  }
+
+  it('renders 12 preset swatches plus a Default option', async () => {
+    push.getPushState.mockResolvedValue('disabled');
+    renderSettings();
+
+    await screen.findByLabelText('Display name');
+    const group = screen.getByRole('radiogroup', { name: 'Accent color' });
+    // 12 presets in the radiogroup, plus a Default option outside it.
+    expect(within(group).getAllByRole('radio')).toHaveLength(12);
+    expect(screen.getByRole('radio', { name: 'Default' })).toBeInTheDocument();
+  });
+
+  it('PATCHes { displayName, color } when a preset swatch is picked', async () => {
+    push.getPushState.mockResolvedValue('disabled');
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = input.toString();
+      if (url.endsWith('/api/auth/me')) return jsonResponse(200, { user: me });
+      if (url.endsWith('/api/users/me') && init?.method === 'PATCH') {
+        const body = JSON.parse(init.body as string) as { displayName: string; color: string | null };
+        return jsonResponse(200, { user: { ...me, color: body.color } });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    renderWithFetch(fetchMock as unknown as typeof fetch);
+
+    await screen.findByLabelText('Display name');
+    await userEvent.click(screen.getByRole('radio', { name: 'Color #f44336' }));
+
+    const patch = fetchMock.mock.calls.find(
+      ([i, init]) => i.toString().endsWith('/api/users/me') && init?.method === 'PATCH',
+    );
+    expect(patch).toBeDefined();
+    expect(JSON.parse(patch?.[1]?.body as string)).toEqual({ displayName: 'Me', color: '#f44336' });
+  });
+
+  it('PATCHes color: null when Default is picked', async () => {
+    push.getPushState.mockResolvedValue('disabled');
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = input.toString();
+      if (url.endsWith('/api/auth/me')) return jsonResponse(200, { user: { ...me, color: '#f44336' } });
+      if (url.endsWith('/api/users/me') && init?.method === 'PATCH') {
+        const body = JSON.parse(init.body as string) as { displayName: string; color: string | null };
+        return jsonResponse(200, { user: { ...me, color: body.color } });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    renderWithFetch(fetchMock as unknown as typeof fetch);
+
+    await screen.findByLabelText('Display name');
+    await userEvent.click(screen.getByRole('radio', { name: 'Default' }));
+
+    const patch = fetchMock.mock.calls.find(
+      ([i, init]) => i.toString().endsWith('/api/users/me') && init?.method === 'PATCH',
+    );
+    expect(patch).toBeDefined();
+    expect(JSON.parse(patch?.[1]?.body as string)).toEqual({ displayName: 'Me', color: null });
   });
 });
 

@@ -14,6 +14,7 @@ import type {
   EditMessageRequest,
   MessageDTO,
   MessagesPage,
+  SearchResponse,
   SendMessageRequest,
   ServerToClientEvents,
   UserDTO,
@@ -22,6 +23,9 @@ import { apiDelete, apiGet, apiPatch, apiPost } from './api';
 import { getSocket } from './socket';
 
 const PAGE_LIMIT = 30;
+
+/** Debounce before a message-search request fires as the user types. */
+export const SEARCH_DEBOUNCE_MS = 300;
 
 // ---------------------------------------------------------------------------
 // Pure helpers (unit-tested; no React, no I/O)
@@ -193,6 +197,73 @@ export function firstUnreadMessageId(
     if (m.sender.id !== meId && m.id > myLastReadMessageId) return m.id;
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Message-search helpers (client-side snippet + term highlighting)
+// ---------------------------------------------------------------------------
+
+/** The distinct, non-empty whitespace-separated terms of a search query. */
+export function searchTerms(query: string): string[] {
+  return query.trim().split(/\s+/).filter(Boolean);
+}
+
+/** Escape a string for safe inclusion in a RegExp. */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * A short excerpt of `content` centred on the first occurrence of any search
+ * term (case-insensitive), with an ellipsis on each clipped side. Content that
+ * already fits within `radius * 2` chars is returned whole, so short messages
+ * read naturally. The server sends full message text; snippeting is purely
+ * presentational.
+ */
+export function searchSnippet(content: string, terms: string[], radius = 40): string {
+  const cleaned = terms.map((t) => t.trim()).filter(Boolean);
+  if (content.length <= radius * 2 || cleaned.length === 0) return content;
+
+  const lower = content.toLowerCase();
+  let idx = -1;
+  for (const term of cleaned) {
+    const at = lower.indexOf(term.toLowerCase());
+    if (at !== -1 && (idx === -1 || at < idx)) idx = at;
+  }
+  if (idx === -1) return content.slice(0, radius * 2).trimEnd() + '…';
+
+  const start = Math.max(0, idx - radius);
+  const end = Math.min(content.length, idx + radius);
+  return (start > 0 ? '…' : '') + content.slice(start, end) + (end < content.length ? '…' : '');
+}
+
+export interface HighlightSegment {
+  text: string;
+  /** True when this segment matched one of the search terms and should be marked. */
+  match: boolean;
+}
+
+/**
+ * Split `text` into consecutive segments, flagging those that match any of the
+ * given `terms` (case-insensitive substring). The server does not send highlight
+ * markers, so the client computes them; an empty term list yields the whole
+ * string as a single unmatched segment.
+ */
+export function highlightSegments(text: string, terms: string[]): HighlightSegment[] {
+  const cleaned = terms.map((t) => t.trim()).filter(Boolean);
+  if (cleaned.length === 0) return [{ text, match: false }];
+
+  const re = new RegExp(`(${cleaned.map(escapeRegExp).join('|')})`, 'gi');
+  // String.split with one capture group alternates unmatched/matched pieces:
+  // captured (matched) terms land on odd original indices.
+  const parts = text.split(re);
+  const segments: HighlightSegment[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+    if (part === undefined || part === '') continue;
+    segments.push({ text: part, match: i % 2 === 1 });
+  }
+  return segments;
 }
 
 // ---------------------------------------------------------------------------
@@ -416,7 +487,20 @@ export function useChat(chatId: number): UseChatResult {
 export interface UseMessagesResult {
   messages: MessageDTO[];
   loadOlder: () => Promise<void>;
+  /** Fetch the next (newer) page toward the present; a no-op at the live edge. */
+  loadNewer: () => Promise<void>;
   hasMore: boolean;
+  /**
+   * True when the visible window reaches the newest message (the "live edge").
+   * A default open is always at the live edge; a windowed open (`?around=`) is
+   * not until `loadNewer` has paged all the way forward. While NOT at the live
+   * edge, live `message:new` events are suppressed from the list (they would
+   * render falsely adjacent to old history) and counted into `newWhileWindowed`.
+   */
+  atLiveEdge: boolean;
+  /** Count of others' `message:new` events suppressed while away from the live
+   *  edge — surfaced for the jump-to-bottom "N new" pill. Resets on reaching it. */
+  newWhileWindowed: number;
   sendMessage: (
     content: string,
     mentions?: number[],
@@ -431,34 +515,68 @@ export interface UseMessagesResult {
   error: string | null;
 }
 
+export interface UseMessagesOptions {
+  /**
+   * When set, the initial fetch is a window CENTRED on this message id
+   * (`?around=`) instead of the newest page — used by ChatPage's focus mode
+   * (jump-to-message / deep link). Changing it re-fetches a fresh window.
+   */
+  targetMessageId?: number | null;
+  /** My user id, so a suppressed `message:new` echo of my own send isn't counted. */
+  meId?: number;
+}
+
 /**
- * Messages for a chat, ascending. Loads the newest page on mount, prepends
- * older pages via `loadOlder`, appends sends, and merges live `message:new`
+ * Messages for a chat, ascending. Loads the newest page on mount (or a window
+ * around `targetMessageId`), prepends older pages via `loadOlder`, appends
+ * newer pages via `loadNewer`, appends sends, and merges live `message:new`
  * events for this chat — all merged by id so nothing duplicates (including the
  * sender's own optimistic copy) and order is preserved.
+ *
+ * Windowed mode (`targetMessageId` set) keeps two cursors: `olderCursor`
+ * (toward history) and `newerCursor` (toward the present, null at the live
+ * edge). Paging forward with `loadNewer` until `newerCursor` is exhausted lands
+ * back at the live edge, where normal live-append behaviour resumes.
  */
-export function useMessages(chatId: number): UseMessagesResult {
+export function useMessages(chatId: number, options: UseMessagesOptions = {}): UseMessagesResult {
+  const { targetMessageId = null, meId = -1 } = options;
   const [messages, setMessages] = useState<MessageDTO[]>([]);
   // Cursor for the NEXT older page; null once exhausted. Only advanced by the
   // initial load and `loadOlder` — never by the live poll (which fetches the
   // newest page and would otherwise rewind us).
   const [olderCursor, setOlderCursor] = useState<number | null>(null);
+  // Cursor for the NEXT newer page; null means the window reaches the present
+  // (the live edge). Only ever non-null in a windowed (`?around=`) open.
+  const [newerCursor, setNewerCursor] = useState<number | null>(null);
+  const [newWhileWindowed, setNewWhileWindowed] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Reset + initial newest page whenever the chat changes.
+  const atLiveEdge = newerCursor === null;
+
+  // Reset + initial fetch whenever the chat OR the focus target changes. A
+  // target message id fetches a centred window (`?around=`); otherwise the
+  // newest page.
   useEffect(() => {
     let cancelled = false;
     setMessages([]);
     setOlderCursor(null);
+    setNewerCursor(null);
+    setNewWhileWindowed(0);
     setLoading(true);
     setError(null);
 
-    apiGet<MessagesPage>(`/api/chats/${chatId}/messages?limit=${PAGE_LIMIT}`)
+    const url =
+      targetMessageId != null
+        ? `/api/chats/${chatId}/messages?around=${targetMessageId}&limit=${PAGE_LIMIT}`
+        : `/api/chats/${chatId}/messages?limit=${PAGE_LIMIT}`;
+
+    apiGet<MessagesPage>(url)
       .then((page) => {
         if (cancelled) return;
         setMessages(page.messages);
         setOlderCursor(page.nextCursor);
+        setNewerCursor(page.newerCursor ?? null);
       })
       .catch((err) => {
         if (!cancelled) setError(errorMessage(err, 'Failed to load messages'));
@@ -470,27 +588,40 @@ export function useMessages(chatId: number): UseMessagesResult {
     return () => {
       cancelled = true;
     };
-  }, [chatId]);
+  }, [chatId, targetMessageId]);
 
-  // Live: merge messages pushed for THIS chat. mergeMessages dedupes by id, so
-  // the echo of our own just-sent message collapses onto the optimistic copy.
+  // Live: a message pushed for THIS chat. At the live edge, merge it (dedupes by
+  // id, so the echo of our own just-sent message collapses onto the optimistic
+  // copy). While windowed away from the live edge, do NOT append — it would
+  // render as falsely adjacent to unrelated old history — but count others'
+  // messages so the jump-to-bottom pill can show "N new".
   useSocketEvent('message:new', (message) => {
-    if (message.chatId === chatId) {
+    if (message.chatId !== chatId) return;
+    if (atLiveEdge) {
       setMessages((prev) => mergeMessages(prev, [message]));
+    } else if (message.sender.id !== meId) {
+      setNewWhileWindowed((c) => c + 1);
     }
   });
 
   // Live edit/delete: replace the message in place (a tombstone when deleted).
+  // Applies in both modes — an in-place patch never changes adjacency.
   useSocketEvent('message:updated', (message) => {
     if (message.chatId === chatId) {
       setMessages((prev) => replaceMessage(prev, message));
     }
   });
 
-  // Catch-up on focus / reconnect: refetch the newest page and merge, closing
-  // any gap where a message:new arrived while the socket was disconnected.
+  // Catch-up on focus / reconnect: merge a refetch to close any gap where a
+  // message:new arrived while the socket was disconnected. At the live edge we
+  // refetch the newest page; while windowed we refetch the SAME window (merging
+  // the newest page would splice recent messages into the middle of history).
   useLiveRefresh(() => {
-    apiGet<MessagesPage>(`/api/chats/${chatId}/messages?limit=${PAGE_LIMIT}`)
+    const url =
+      !atLiveEdge && targetMessageId != null
+        ? `/api/chats/${chatId}/messages?around=${targetMessageId}&limit=${PAGE_LIMIT}`
+        : `/api/chats/${chatId}/messages?limit=${PAGE_LIMIT}`;
+    apiGet<MessagesPage>(url)
       .then((page) => setMessages((prev) => mergeMessages(prev, page.messages)))
       .catch(() => {
         /* transient failure — keep showing what we have */
@@ -505,6 +636,20 @@ export function useMessages(chatId: number): UseMessagesResult {
     setMessages((prev) => mergeMessages(prev, page.messages));
     setOlderCursor(page.nextCursor);
   }, [chatId, olderCursor]);
+
+  const loadNewer = useCallback(async () => {
+    if (newerCursor == null) return;
+    const page = await apiGet<MessagesPage>(
+      `/api/chats/${chatId}/messages?after=${newerCursor}&limit=${PAGE_LIMIT}`,
+    );
+    setMessages((prev) => mergeMessages(prev, page.messages));
+    const nextNewer = page.newerCursor ?? null;
+    setNewerCursor(nextNewer);
+    // Reaching the live edge means the page just fetched includes everything up
+    // to the present (any messages that arrived while windowed are now loaded),
+    // so the suppressed-count is spent.
+    if (nextNewer === null) setNewWhileWindowed(0);
+  }, [chatId, newerCursor]);
 
   const sendMessage = useCallback(
     async (
@@ -561,7 +706,10 @@ export function useMessages(chatId: number): UseMessagesResult {
   return {
     messages,
     loadOlder,
+    loadNewer,
     hasMore: olderCursor !== null,
+    atLiveEdge,
+    newWhileWindowed,
     sendMessage,
     editMessage,
     deleteMessage,
@@ -569,6 +717,77 @@ export function useMessages(chatId: number): UseMessagesResult {
     loading,
     error,
   };
+}
+
+export interface UseMessageSearchResult {
+  messages: MessageDTO[];
+  loading: boolean;
+  error: string | null;
+  hasMore: boolean;
+  loadMore: () => void;
+}
+
+/**
+ * Full-text message search across my chats. Debounces the (trimmed) query by
+ * {@link SEARCH_DEBOUNCE_MS} before hitting `/api/search`; an empty query clears
+ * results without a request. Results are newest-first (server order); `loadMore`
+ * appends the next older page via the `nextCursor` convention.
+ */
+export function useMessageSearch(query: string): UseMessageSearchResult {
+  const trimmed = query.trim();
+  const [messages, setMessages] = useState<MessageDTO[]>([]);
+  const [cursor, setCursor] = useState<number | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (trimmed === '') {
+      setMessages([]);
+      setCursor(null);
+      setError(null);
+      setLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    const handle = setTimeout(() => {
+      apiGet<SearchResponse>(`/api/search?q=${encodeURIComponent(trimmed)}&limit=${PAGE_LIMIT}`)
+        .then((res) => {
+          if (cancelled) return;
+          setMessages(res.messages);
+          setCursor(res.nextCursor);
+        })
+        .catch((err) => {
+          if (!cancelled) setError(errorMessage(err, 'Search failed'));
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false);
+        });
+    }, SEARCH_DEBOUNCE_MS);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(handle);
+    };
+  }, [trimmed]);
+
+  const loadMore = useCallback(() => {
+    if (cursor == null || trimmed === '') return;
+    apiGet<SearchResponse>(
+      `/api/search?q=${encodeURIComponent(trimmed)}&before=${cursor}&limit=${PAGE_LIMIT}`,
+    )
+      .then((res) => {
+        setMessages((prev) => [...prev, ...res.messages]);
+        setCursor(res.nextCursor);
+      })
+      .catch(() => {
+        /* transient failure — keep showing what we have */
+      });
+  }, [trimmed, cursor]);
+
+  return { messages, loading, error, hasMore: cursor !== null, loadMore };
 }
 
 /** Mark the chat read up to and including `messageId` (fire-and-forget). */

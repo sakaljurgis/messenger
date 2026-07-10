@@ -34,6 +34,7 @@ describe('POST /api/auth/register', () => {
       email: 'alice@example.com', // lowercased
       displayName: 'Alice', // trimmed
       isBot: false,
+      color: null,
     });
     // Never leak sensitive fields.
     expect(res.body.user).not.toHaveProperty('passwordHash');

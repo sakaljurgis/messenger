@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import type { UserDTO } from '@messenger/shared';
 import { apiPatch, apiPut } from '../lib/api';
 import { useAuth } from '../lib/auth';
+import { avatarHue } from '../lib/chats';
 import { disablePush, enablePush, getPushState, type PushState } from '../lib/push';
 import { getStoredTheme, setTheme, type Theme } from '../lib/theme';
 
@@ -71,6 +72,97 @@ function ProfileSection() {
           {busy ? 'Saving…' : 'Save name'}
         </button>
       </form>
+    </section>
+  );
+}
+
+/** A dozen preset accent colors offered in Settings; order is purely visual. */
+const PRESET_COLORS = [
+  '#f44336',
+  '#e91e63',
+  '#9c27b0',
+  '#673ab7',
+  '#3f51b5',
+  '#2196f3',
+  '#00bcd4',
+  '#009688',
+  '#4caf50',
+  '#ff9800',
+  '#795548',
+  '#607d8b',
+] as const;
+
+/**
+ * Accent color picker: a grid of presets plus a "Default" option (the color
+ * Avatar derives from the user id — same one shown today when no color is
+ * set). Picking a preset PATCHes `{ displayName, color }`; Default sends
+ * `color: null` to revert. The current selection gets a ring.
+ */
+function ColorSection() {
+  const { user, updateUser } = useAuth();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function pick(color: string | null) {
+    if (!user || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await apiPatch<{ user: UserDTO }>('/api/users/me', {
+        displayName: user.displayName,
+        color,
+      });
+      updateUser(res.user);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not update color');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const selected = user?.color ?? null;
+  const derivedColor = `hsl(${avatarHue(user?.id ?? 0)} 70% 45%)`;
+
+  return (
+    <section className="mb-6">
+      <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Color</h2>
+      <div className="rounded-xl bg-gray-50 p-4 dark:bg-gray-800">
+        <div className="grid grid-cols-6 gap-3" role="radiogroup" aria-label="Accent color">
+          {PRESET_COLORS.map((c) => (
+            <button
+              key={c}
+              type="button"
+              role="radio"
+              aria-checked={selected === c}
+              aria-label={`Color ${c}`}
+              onClick={() => pick(c)}
+              disabled={busy}
+              className={`h-8 w-8 rounded-full transition-shadow disabled:opacity-60 ${
+                selected === c
+                  ? 'ring-2 ring-[#0084ff] ring-offset-2 ring-offset-gray-50 dark:ring-offset-gray-800'
+                  : ''
+              }`}
+              style={{ backgroundColor: c }}
+            />
+          ))}
+        </div>
+        <button
+          type="button"
+          role="radio"
+          aria-checked={selected === null}
+          onClick={() => pick(null)}
+          disabled={busy}
+          className={`mt-3 flex items-center gap-2 rounded-full px-3 py-1.5 text-sm font-medium text-gray-700 transition-colors disabled:opacity-60 dark:text-gray-200 ${
+            selected === null
+              ? 'ring-2 ring-[#0084ff] ring-offset-2 ring-offset-gray-50 dark:ring-offset-gray-800'
+              : ''
+          }`}
+        >
+          <span className="h-6 w-6 flex-shrink-0 rounded-full" style={{ backgroundColor: derivedColor }} />
+          Default
+        </button>
+        {error && <p className="mt-3 text-sm text-red-600 dark:text-red-400">{error}</p>}
+      </div>
     </section>
   );
 }
@@ -285,6 +377,8 @@ export default function SettingsPage() {
       <h1 className="mb-4 text-xl font-bold text-gray-900 dark:text-gray-100">Settings</h1>
 
       <ProfileSection />
+
+      <ColorSection />
 
       <PasswordSection />
 

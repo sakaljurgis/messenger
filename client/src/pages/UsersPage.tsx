@@ -62,7 +62,7 @@ export default function UsersPage() {
                   disabled={openingId !== null}
                   className="flex w-full items-center gap-3 rounded-xl px-2 py-2 text-left transition-colors hover:bg-gray-50 disabled:opacity-60 dark:hover:bg-gray-800"
                 >
-                  <Avatar name={me.displayName} id={me.id} />
+                  <Avatar name={me.displayName} id={me.id} color={me.color} />
                   <span className="flex min-w-0 flex-col">
                     <span className="font-medium text-gray-900 dark:text-gray-100">Notes to self</span>
                     <span className="text-sm text-gray-500 dark:text-gray-400">Message yourself</span>
@@ -83,7 +83,12 @@ export default function UsersPage() {
                     disabled={openingId !== null}
                     className="flex w-full items-center gap-3 rounded-xl px-2 py-2 text-left transition-colors hover:bg-gray-50 disabled:opacity-60 dark:hover:bg-gray-800"
                   >
-                    <Avatar name={user.displayName} id={user.id} online={onlineIds.has(user.id)} />
+                    <Avatar
+                      name={user.displayName}
+                      id={user.id}
+                      color={user.color}
+                      online={onlineIds.has(user.id)}
+                    />
                     <span className="font-medium text-gray-900 dark:text-gray-100">{user.displayName}</span>
                     {user.isBot && (
                       <span className="rounded-full bg-gray-200 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-gray-600 dark:bg-gray-700 dark:text-gray-300">

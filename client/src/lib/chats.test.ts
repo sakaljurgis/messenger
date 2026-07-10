@@ -4,9 +4,12 @@ import {
   chatInitials,
   chatTitle,
   firstUnreadMessageId,
+  highlightSegments,
   mergeMessages,
   readPositions,
   replaceMessage,
+  searchSnippet,
+  searchTerms,
   tombstone,
   upsertChat,
 } from './chats';
@@ -262,5 +265,60 @@ describe('firstUnreadMessageId', () => {
   it('returns null when only my own messages are unread', () => {
     const messages = [msg(1, bob, 'read'), msg(2, ann, 'mine, unread by the other def but implicitly read')];
     expect(firstUnreadMessageId(messages, 1, ann.id)).toBeNull();
+  });
+});
+
+describe('searchTerms', () => {
+  it('splits on whitespace, dropping empties', () => {
+    expect(searchTerms('  hello   world ')).toEqual(['hello', 'world']);
+    expect(searchTerms('single')).toEqual(['single']);
+    expect(searchTerms('   ')).toEqual([]);
+  });
+});
+
+describe('highlightSegments', () => {
+  it('flags each case-insensitive term match, leaving the rest unmarked', () => {
+    const segs = highlightSegments('Hello World', ['world']);
+    expect(segs).toEqual([
+      { text: 'Hello ', match: false },
+      { text: 'World', match: true },
+    ]);
+  });
+
+  it('marks multiple distinct terms', () => {
+    const segs = highlightSegments('the quick brown fox', ['quick', 'fox']);
+    expect(segs.filter((s) => s.match).map((s) => s.text)).toEqual(['quick', 'fox']);
+  });
+
+  it('handles adjacent matches and preserves original casing', () => {
+    const segs = highlightSegments('aAa', ['a']);
+    expect(segs.map((s) => s.text).join('')).toBe('aAa');
+    expect(segs.every((s) => s.match)).toBe(true);
+  });
+
+  it('treats regex metacharacters in terms literally', () => {
+    const segs = highlightSegments('a.b c', ['a.b']);
+    expect(segs[0]).toEqual({ text: 'a.b', match: true });
+    // The '.' must not match the space in 'a b' — literal only.
+    expect(highlightSegments('axb', ['a.b']).some((s) => s.match)).toBe(false);
+  });
+
+  it('returns the whole string unmarked when there are no terms', () => {
+    expect(highlightSegments('untouched', [])).toEqual([{ text: 'untouched', match: false }]);
+  });
+});
+
+describe('searchSnippet', () => {
+  it('returns short content whole', () => {
+    expect(searchSnippet('short and sweet', ['sweet'])).toBe('short and sweet');
+  });
+
+  it('windows long content around the first matching term with ellipses', () => {
+    const long = 'x'.repeat(100) + ' NEEDLE ' + 'y'.repeat(100);
+    const snippet = searchSnippet(long, ['needle'], 20);
+    expect(snippet).toContain('NEEDLE');
+    expect(snippet.startsWith('…')).toBe(true);
+    expect(snippet.endsWith('…')).toBe(true);
+    expect(snippet.length).toBeLessThan(long.length);
   });
 });

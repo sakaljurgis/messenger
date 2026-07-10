@@ -56,6 +56,7 @@ describe('GET /api/users', () => {
       email: 'bob@example.com',
       displayName: 'Bob',
       isBot: false,
+      color: null,
     });
   });
 });
@@ -87,6 +88,38 @@ describe('PATCH /api/users/me', () => {
     const { agent } = await register(app, 'alice@example.com', 'Alice');
     const res = await agent.patch('/api/users/me').send({ displayName: '   ' });
     expect(res.status).toBe(400);
+  });
+
+  it('leaves color unchanged when omitted', async () => {
+    const { agent } = await register(app, 'alice@example.com', 'Alice');
+    await agent.patch('/api/users/me').send({ displayName: 'Alice', color: '#123abc' });
+
+    const res = await agent.patch('/api/users/me').send({ displayName: 'Alicia' });
+    expect(res.status).toBe(200);
+    expect(res.body.user.color).toBe('#123abc');
+  });
+
+  it('sets and normalizes a valid hex color to lowercase', async () => {
+    const { agent } = await register(app, 'alice@example.com', 'Alice');
+    const res = await agent.patch('/api/users/me').send({ displayName: 'Alice', color: '#ABC123' });
+    expect(res.status).toBe(200);
+    expect(res.body.user.color).toBe('#abc123');
+  });
+
+  it('rejects an invalid hex color with 400', async () => {
+    const { agent } = await register(app, 'alice@example.com', 'Alice');
+    const res = await agent.patch('/api/users/me').send({ displayName: 'Alice', color: 'not-a-color' });
+    expect(res.status).toBe(400);
+    expect(res.body).toHaveProperty('error');
+  });
+
+  it('reverts to the derived default when color is null', async () => {
+    const { agent } = await register(app, 'alice@example.com', 'Alice');
+    await agent.patch('/api/users/me').send({ displayName: 'Alice', color: '#123abc' });
+
+    const res = await agent.patch('/api/users/me').send({ displayName: 'Alice', color: null });
+    expect(res.status).toBe(200);
+    expect(res.body.user.color).toBeNull();
   });
 });
 

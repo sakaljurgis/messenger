@@ -63,6 +63,11 @@ describe('shouldCompress', () => {
   it('skips non-image files', () => {
     expect(shouldCompress(fakeFile('a.pdf', 'application/pdf', 2 * MB))).toBe(false);
   });
+
+  it('skips videos (uploaded as-is, never re-encoded client-side)', () => {
+    expect(shouldCompress(fakeFile('a.mp4', 'video/mp4', 2 * MB))).toBe(false);
+    expect(shouldCompress(fakeFile('a.webm', 'video/webm', 2 * MB))).toBe(false);
+  });
 });
 
 describe('compressImage', () => {

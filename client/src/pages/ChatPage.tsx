@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   REACTION_EMOJIS,
   type AttachmentDTO,
@@ -10,8 +10,9 @@ import {
   type UserDTO,
 } from '@messenger/shared';
 import { useAuth } from '../lib/auth';
-import { splitByMentions } from '../lib/mentions';
+import { MessageMarkdown } from '../lib/markdown';
 import {
+  avatarHue,
   chatTitle,
   firstUnreadMessageId,
   formatDaySeparator,
@@ -64,6 +65,11 @@ const LONG_PRESS_MS = 500;
 
 /** Gap between a bubble and its actions popover (the mt-1/mb-1 spacing). */
 const MENU_GAP_PX = 4;
+
+/** A member's accent color: their picked color, else the id-derived hue Avatar uses. */
+function accentColor(user: UserDTO): string {
+  return user.color ?? `hsl(${avatarHue(user.id)} 70% 45%)`;
+}
 
 /** A deleted message: a muted, italic outline bubble with no fill and no menu. */
 function TombstoneBubble() {
@@ -353,8 +359,9 @@ function buildRows(messages: MessageDTO[], meId: number, isGroup: boolean): Row[
   });
 }
 
-/** Render message text, styling any `@mention` of a chat member. Mentions of ME
- *  get a subtle highlight in others' (gray) bubbles so being tagged stands out. */
+/** Render message text as chat-safe markdown (lib/markdown), which also styles
+ *  any `@mention` of a chat member — mentions of ME get a subtle highlight in
+ *  others' (gray) bubbles so being tagged stands out. */
 function MessageContent({
   message,
   members,
@@ -366,24 +373,14 @@ function MessageContent({
   meId: number;
   isMine: boolean;
 }) {
-  if (message.mentions.length === 0) return <>{message.content}</>;
-
-  const segments = splitByMentions(message.content, members, message.mentions);
   return (
-    <>
-      {segments.map((seg, i) => {
-        if (!seg.mention) return <span key={i}>{seg.text}</span>;
-        const base = isMine
-          ? 'font-semibold underline decoration-white/60'
-          : 'font-semibold text-[#0084ff]';
-        const meHighlight = !isMine && seg.mention.id === meId ? ' bg-[#0084ff]/10 rounded px-0.5' : '';
-        return (
-          <span key={i} className={base + meHighlight}>
-            {seg.text}
-          </span>
-        );
-      })}
-    </>
+    <MessageMarkdown
+      content={message.content}
+      mentions={message.mentions}
+      members={members}
+      meId={meId}
+      isMine={isMine}
+    />
   );
 }
 
@@ -438,6 +435,28 @@ function AttachmentImages({
         </button>
       ))}
     </div>
+  );
+}
+
+/**
+ * A 'video' attachment (mp4/webm only — see AttachmentKind): an inline
+ * `<video>` with native controls, capped at the same height as a bare single
+ * image so it never dominates the thread. `playsInline` keeps iOS from
+ * hijacking playback into fullscreen; `preload="metadata"` fetches just
+ * enough (via the Range-enabled serving endpoint) to know duration/size
+ * without downloading the whole file up front. Always its own block — never
+ * placed inside the image grid.
+ */
+function AttachmentVideo({ video }: { video: AttachmentDTO }) {
+  return (
+    <video
+      controls
+      playsInline
+      preload="metadata"
+      src={attachmentUrl(video.id)}
+      data-testid="video-attachment"
+      className="max-h-80 max-w-full rounded-2xl bg-black"
+    />
   );
 }
 
@@ -519,6 +538,7 @@ function MessageStack({
   onJumpToMessage: (messageId: number) => void;
 }) {
   const images = message.attachments.filter((a) => a.kind === 'image');
+  const videos = message.attachments.filter((a) => a.kind === 'video');
   const files = message.attachments.filter((a) => a.kind === 'file');
   const hasText = message.content.length > 0;
   const bubble = isMine ? 'bg-[#0084ff] text-white' : 'bg-gray-200 text-gray-900 dark:bg-gray-700 dark:text-gray-100';
@@ -534,11 +554,15 @@ function MessageStack({
         />
       )}
       {images.length > 0 && <AttachmentImages images={images} onOpen={onOpenImage} />}
+      {videos.map((v) => (
+        <AttachmentVideo key={v.id} video={v} />
+      ))}
       {files.map((f) => (
         <AttachmentFile key={f.id} file={f} isMine={isMine} />
       ))}
       {hasText && (
-        <div className={`whitespace-pre-wrap break-words rounded-2xl px-3 py-2 ${bubble}`}>
+        // No whitespace-pre-wrap: the markdown renderer owns line breaks (remark-breaks).
+        <div className={`break-words rounded-2xl px-3 py-2 ${bubble}`}>
           <MessageContent message={message} members={members} meId={meId} isMine={isMine} />
         </div>
       )}
@@ -569,7 +593,7 @@ function ReadReceipts({ members }: { members: ChatMemberDTO[] }) {
     <div className="flex justify-end px-3" title={names}>
       <div className="flex -space-x-1">
         {members.map((m) => (
-          <Avatar key={m.id} name={m.displayName} id={m.id} size="xs" />
+          <Avatar key={m.id} name={m.displayName} id={m.id} size="xs" color={m.color} />
         ))}
       </div>
     </div>
@@ -683,14 +707,24 @@ function MessageRow({
                 onClick={() => setNameRevealed((v) => !v)}
                 className="block rounded-full"
               >
-                <Avatar name={message.sender.displayName} id={message.sender.id} size="sm" />
+                <Avatar
+                  name={message.sender.displayName}
+                  id={message.sender.id}
+                  size="sm"
+                  color={message.sender.color}
+                />
               </button>
             )}
           </div>
         )}
         <div className="flex min-w-0 flex-col items-start">
           {(showSender || nameRevealed) && (
-            <span className="mb-0.5 ml-1 text-xs text-gray-500 dark:text-gray-400">{message.sender.displayName}</span>
+            <span
+              className="mb-0.5 ml-1 text-xs font-medium"
+              style={{ color: accentColor(message.sender) }}
+            >
+              {message.sender.displayName}
+            </span>
           )}
           {message.isDeleted ? (
             <TombstoneBubble />
@@ -767,9 +801,27 @@ export default function ChatPage() {
   const meId = user?.id ?? -1;
 
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  // Focus mode: `?message=<id>` opens a window CENTRED on that message (search
+  // jump / reply-jump-fallback / deep link) rather than the newest page. Kept
+  // in the URL so the view is shareable and back-button friendly.
+  const focusParam = Number(searchParams.get('message'));
+  const focusId = Number.isFinite(focusParam) && focusParam > 0 ? focusParam : null;
+
   const { chat, removed } = useChat(chatId);
-  const { messages, loadOlder, hasMore, sendMessage, editMessage, deleteMessage, toggleReaction, loading } =
-    useMessages(chatId);
+  const {
+    messages,
+    loadOlder,
+    loadNewer,
+    hasMore,
+    atLiveEdge,
+    newWhileWindowed,
+    sendMessage,
+    editMessage,
+    deleteMessage,
+    toggleReaction,
+    loading,
+  } = useMessages(chatId, { targetMessageId: focusId, meId });
 
   // I'm no longer a member (left the group, maybe in another tab) — bail out.
   useEffect(() => {
@@ -780,6 +832,10 @@ export default function ChatPage() {
   const bottomRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true); // is the viewport near the bottom?
   const didInitialScroll = useRef(false);
+  // Identifies the current window (chat + focus target). When it changes the
+  // initial-scroll effect re-runs (re-centres a new focus, or bottoms a fresh
+  // newest-page open). Reset render-phase so it settles before layout effects.
+  const scrollKeyRef = useRef<string>('');
   const lastMarkedId = useRef<number>(-1);
   const [lightbox, setLightbox] = useState<AttachmentDTO | null>(null);
   const [editing, setEditing] = useState<MessageDTO | null>(null);
@@ -807,6 +863,14 @@ export default function ChatPage() {
   const members = chat?.members ?? [];
   const rows = buildRows(messages, meId, isGroup);
 
+  // A change of chat or focus target re-arms the initial-scroll effect. Adjusted
+  // render-phase (refs, no state) so it's settled before the layout effect runs.
+  const scrollKey = `${chatId}:${focusId ?? 'live'}`;
+  if (scrollKeyRef.current !== scrollKey) {
+    scrollKeyRef.current = scrollKey;
+    didInitialScroll.current = false;
+  }
+
   // Freeze the unread boundary the moment this chat's first non-empty message
   // list is available. Adjusted during render (not an Effect) — same "adjust
   // state while rendering" idea as the resetRef pattern in useExpiringTyping
@@ -814,7 +878,8 @@ export default function ChatPage() {
   // layout effect below runs. The `messages[0].chatId === chatId` guard skips
   // the transitional render where `chat`/`messages` still hold the PREVIOUS
   // chat's data (chatId flips a render before useChat/useMessages catch up),
-  // so switching chats never freezes on the wrong chat's data.
+  // so switching chats never freezes on the wrong chat's data. In focus mode we
+  // freeze with NO boundary — a windowed open never shows an unread divider.
   if (
     frozenChatIdRef.current !== chatId &&
     chat &&
@@ -822,9 +887,13 @@ export default function ChatPage() {
     messages[0]!.chatId === chatId
   ) {
     frozenChatIdRef.current = chatId;
-    const myLastRead = chat.members.find((m) => m.id === meId)?.lastReadMessageId ?? 0;
-    const boundary = firstUnreadMessageId(messages, myLastRead, meId);
-    if (boundary !== unreadBoundaryId) setUnreadBoundaryId(boundary);
+    if (focusId != null) {
+      if (unreadBoundaryId !== null) setUnreadBoundaryId(null);
+    } else {
+      const myLastRead = chat.members.find((m) => m.id === meId)?.lastReadMessageId ?? 0;
+      const boundary = firstUnreadMessageId(messages, myLastRead, meId);
+      if (boundary !== unreadBoundaryId) setUnreadBoundaryId(boundary);
+    }
   }
 
   // Presence + typing. The header dot is DM-only (the other member); the typing
@@ -857,58 +926,80 @@ export default function ChatPage() {
     }
   }
 
-  // Auto-scroll: jump to the frozen unread divider (or the bottom, if there
-  // isn't one) on first load; afterwards only follow new messages when the
-  // user is already near the bottom (don't yank them up).
+  // Auto-scroll. On first load of a window: in focus mode centre + flash the
+  // target message (waiting for it to land in the DOM); otherwise jump to the
+  // frozen unread divider, or the bottom if there isn't one. Afterwards only
+  // follow new messages when the user is already near the bottom.
   useLayoutEffect(() => {
     if (messages.length === 0) return;
+    // Skip the transitional render where the list still holds the previous
+    // chat's data (chatId flips a render before useMessages catches up).
+    if (messages[0]!.chatId !== chatId) return;
     if (!didInitialScroll.current) {
-      didInitialScroll.current = true;
-      if (unreadBoundaryId !== null) {
-        document.getElementById('unread-divider')?.scrollIntoView({ block: 'center' });
+      if (focusId != null) {
+        const el = document.getElementById(`message-${focusId}`);
+        if (!el) return; // the around-window hasn't loaded yet — wait for it
+        didInitialScroll.current = true;
+        el.scrollIntoView({ block: 'center' });
+        setHighlightId(focusId);
+        window.setTimeout(() => setHighlightId((cur) => (cur === focusId ? null : cur)), 1200);
+        stickToBottom.current = false;
       } else {
-        bottomRef.current?.scrollIntoView({ block: 'end' });
+        didInitialScroll.current = true;
+        if (unreadBoundaryId !== null) {
+          document.getElementById('unread-divider')?.scrollIntoView({ block: 'center' });
+        } else {
+          bottomRef.current?.scrollIntoView({ block: 'end' });
+        }
+        stickToBottom.current = true;
       }
-      stickToBottom.current = true;
     } else if (stickToBottom.current) {
       bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
     }
-  }, [messages, unreadBoundaryId]);
+  }, [messages, unreadBoundaryId, chatId, focusId]);
 
-  // Reset the jump-to-bottom pill's per-chat counters when the chat changes.
-  // The unread-boundary freeze above self-heals via the chatId/messages
-  // guard, but the append counter has no equivalent natural reset.
+  // Reset the jump-to-bottom pill's per-chat counters when the chat or focus
+  // target changes. The unread-boundary freeze above self-heals via the
+  // chatId/messages guard, but the append counter has no equivalent reset.
   useEffect(() => {
     prevNewestIdRef.current = null;
     setAtBottom(true);
     setNewMessageCount(0);
-  }, [chatId]);
+  }, [chatId, focusId]);
 
   // Count other members' messages appended to the list while scrolled away
   // from the bottom, for the jump-to-bottom pill's "N new" badge. A prepend
   // (loadOlder) or an in-place edit/delete never raises the newest id, so
-  // only a genuine append is counted; my own messages never count.
+  // only a genuine append is counted; my own messages never count. Only runs at
+  // the live edge — while windowed, `newWhileWindowed` (from useMessages) drives
+  // the pill instead, and a `loadNewer` append must not be miscounted as "new".
   useEffect(() => {
     const newest = messages[messages.length - 1];
     if (!newest) return;
+    if (!atLiveEdge) {
+      // Keep the ref current so the live-edge transition doesn't count a batch.
+      prevNewestIdRef.current = newest.id;
+      return;
+    }
     const prevNewestId = prevNewestIdRef.current;
     prevNewestIdRef.current = newest.id;
     if (prevNewestId === null || newest.id <= prevNewestId || atBottom) return;
     const appended = messages.filter((m) => m.id > prevNewestId && m.sender.id !== meId).length;
     if (appended > 0) setNewMessageCount((c) => c + appended);
-  }, [messages, atBottom, meId]);
+  }, [messages, atBottom, meId, atLiveEdge]);
 
-  // Mark read up to the newest message whenever the list changes. Best-effort
-  // and fire-and-forget (nothing in the UI depends on the response) — a
-  // transient failure just means the next message/focus/reconnect retries it.
+  // Mark read up to the newest message whenever the list changes — but ONLY at
+  // the live edge. Marking read from the middle of a windowed view is wrong when
+  // newer unread messages exist beyond the window. Best-effort/fire-and-forget.
   useEffect(() => {
+    if (!atLiveEdge) return;
     const newest = messages[messages.length - 1];
     if (!newest || newest.id === lastMarkedId.current) return;
     lastMarkedId.current = newest.id;
     markRead(chatId, newest.id).catch(() => {
       /* best-effort — the read marker is re-sent on the next message anyway */
     });
-  }, [chatId, messages]);
+  }, [chatId, messages, atLiveEdge]);
 
   async function handleLoadOlder() {
     const el = scrollRef.current;
@@ -921,8 +1012,29 @@ export default function ChatPage() {
     });
   }
 
-  /** Jump-to-bottom pill: smooth-scroll to the sentinel and hide the pill. */
+  /** Drop the `?message=` focus param, returning to (and re-fetching) the live
+   *  newest window. `replace` so the reset doesn't add a history entry. */
+  function resetToLiveEdge() {
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete('message');
+        return next;
+      },
+      { replace: true },
+    );
+  }
+
+  /**
+   * Jump-to-bottom pill. In a windowed view it resets to the live newest window
+   * (a refetch — the older window's newest is NOT the present); at the live edge
+   * it just smooth-scrolls to the sentinel and clears the count.
+   */
   function handleJumpToBottom() {
+    if (!atLiveEdge) {
+      resetToLiveEdge();
+      return;
+    }
     bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
     stickToBottom.current = true;
     setAtBottom(true);
@@ -961,13 +1073,29 @@ export default function ChatPage() {
     setEditing(message);
   }
 
-  /** Scroll to and briefly flash the quoted original, if it's currently loaded. */
+  /**
+   * Jump to a message (e.g. a reply's quoted original). When it's already in the
+   * loaded window, scroll + flash it directly. Otherwise fall back to focus mode
+   * via the `?message=` param, which re-fetches a window centred on it (the
+   * initial-scroll effect then centres + flashes it). Routing through the URL
+   * makes the jump shareable and back-button friendly.
+   */
   function jumpToMessage(messageId: number) {
     const el = document.getElementById(`message-${messageId}`);
-    if (!el) return; // not in the loaded window — do nothing
-    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    setHighlightId(messageId);
-    window.setTimeout(() => setHighlightId((cur) => (cur === messageId ? null : cur)), 1200);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setHighlightId(messageId);
+      window.setTimeout(() => setHighlightId((cur) => (cur === messageId ? null : cur)), 1200);
+      return;
+    }
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.set('message', String(messageId));
+        return next;
+      },
+      { replace: false },
+    );
   }
 
   function handleReact(message: MessageDTO, emoji: string) {
@@ -1002,6 +1130,7 @@ export default function ChatPage() {
             name={title}
             id={isGroup ? chat.id : (dmOther?.id ?? chat.id)}
             online={otherOnline}
+            color={isGroup ? undefined : dmOther?.color}
           />
         )}
         {isGroup ? (
@@ -1062,7 +1191,7 @@ export default function ChatPage() {
                     </span>
                   </div>
                 )}
-                {unreadBoundaryId === row.message.id && <UnreadDivider />}
+                {focusId == null && unreadBoundaryId === row.message.id && <UnreadDivider />}
                 <MessageRow
                   row={row}
                   members={members}
@@ -1080,11 +1209,26 @@ export default function ChatPage() {
               </div>
             ))
           )}
+
+          {/* Mirror of "Load older" for the newer side — only present in a
+              windowed (focus-mode) view that hasn't reached the present yet. */}
+          {!atLiveEdge && messages.length > 0 && (
+            <div className="flex justify-center py-2">
+              <button
+                type="button"
+                onClick={() => void loadNewer()}
+                className="rounded-full bg-gray-100 px-4 py-1 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700"
+              >
+                Load newer
+              </button>
+            </div>
+          )}
+
           <TypingIndicator names={typingNames} isGroup={isGroup} />
           <div ref={bottomRef} />
         </div>
 
-        {!atBottom && (
+        {(!atBottom || !atLiveEdge) && (
           <button
             type="button"
             onClick={handleJumpToBottom}
@@ -1092,7 +1236,9 @@ export default function ChatPage() {
             className="absolute bottom-3 right-3 flex items-center gap-1.5 rounded-full bg-white px-3 py-2 text-sm font-medium text-gray-700 shadow-lg ring-1 ring-gray-200 transition-colors hover:bg-gray-50 dark:bg-gray-800 dark:text-gray-200 dark:ring-gray-700 dark:hover:bg-gray-700"
           >
             <DownArrowIcon />
-            {newMessageCount > 0 && <span>{newMessageCount} new</span>}
+            {(atLiveEdge ? newMessageCount : newWhileWindowed) > 0 && (
+              <span>{atLiveEdge ? newMessageCount : newWhileWindowed} new</span>
+            )}
           </button>
         )}
       </div>

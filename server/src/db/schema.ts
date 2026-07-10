@@ -27,6 +27,12 @@ export const users = sqliteTable('users', {
   createdAt: integer('created_at', { mode: 'timestamp' })
     .notNull()
     .$defaultFn(() => new Date()),
+  /**
+   * User-picked accent color as '#rrggbb'; null → the client derives a stable
+   * color from the user id (see UserDTO.color in shared). Added in
+   * drizzle/0007_user_colors.sql.
+   */
+  color: text('color'),
 });
 
 export const sessions = sqliteTable(
@@ -77,6 +83,12 @@ export const chatMembers = sqliteTable(
   ],
 );
 
+// NOTE: an external-content FTS5 virtual table `messages_fts` (over
+// messages.content, content_rowid=id) plus INSERT/UPDATE/DELETE sync triggers
+// live in drizzle/0006_messages_fts.sql. FTS5 virtual tables can't be expressed
+// in the Drizzle schema, so they're hand-written there and queried via raw SQL
+// in chats/service#searchMessages (which additionally filters tombstones — a
+// soft-delete leaves the original text in the index).
 export const messages = sqliteTable(
   'messages',
   {
@@ -158,7 +170,7 @@ export const attachments = sqliteTable(
       .references(() => users.id),
     /** Null until a message links this attachment on send; then the owning message. */
     messageId: integer('message_id').references(() => messages.id),
-    kind: text('kind', { enum: ['image', 'file'] }).notNull(),
+    kind: text('kind', { enum: ['image', 'video', 'file'] }).notNull(),
     originalName: text('original_name').notNull(),
     mimeType: text('mime_type').notNull(),
     sizeBytes: integer('size_bytes').notNull(),

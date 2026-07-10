@@ -14,6 +14,8 @@ import {
   getMemberIds,
   listChatSummaries,
   listMessages,
+  listMessagesAfter,
+  listMessagesAround,
   toggleReaction,
 } from '../chats/service.js';
 import type { Db } from '../db/index.js';
@@ -200,7 +202,10 @@ export function chatsRouter(db: Db, events: ChatEvents, storage: Storage): Route
     res.status(200).json({ chat: summary });
   });
 
-  // GET /api/chats/:id/messages — cursor-paginated history, oldest-first.
+  // GET /api/chats/:id/messages — history, oldest-first. Default (no param) and
+  // ?before= walk backwards; ?after= walks forwards; ?around=<id> returns a
+  // window centred on a message. The three windowing params are mutually
+  // exclusive. Only the windowed forms carry `newerCursor`.
   router.get('/:id/messages', requireAuth, (req, res) => {
     const me = req.user!;
     const chatId = parseId(req.params.id);
@@ -208,8 +213,32 @@ export function chatsRouter(db: Db, events: ChatEvents, storage: Storage): Route
       res.status(404).json(CHAT_NOT_FOUND);
       return;
     }
-    const before = parseCursor(req.query.before);
+    const present = (['before', 'after', 'around'] as const).filter(
+      (k) => req.query[k] !== undefined,
+    );
+    if (present.length > 1) {
+      res.status(400).json({ error: 'Use only one of before, after, around' });
+      return;
+    }
     const limit = parseLimit(req.query.limit);
+
+    if (req.query.around !== undefined) {
+      const around = parseId(req.query.around);
+      const page = around === null ? null : listMessagesAround(db, chatId, around, limit);
+      if (!page) {
+        res.status(404).json(MESSAGE_NOT_FOUND);
+        return;
+      }
+      res.status(200).json(page);
+      return;
+    }
+    if (req.query.after !== undefined) {
+      // Invalid/garbage cursor falls back to 0 → "walk forward from the oldest".
+      const after = parseCursor(req.query.after) ?? 0;
+      res.status(200).json(listMessagesAfter(db, chatId, after, limit));
+      return;
+    }
+    const before = parseCursor(req.query.before);
     res.status(200).json(listMessages(db, chatId, before, limit));
   });
 

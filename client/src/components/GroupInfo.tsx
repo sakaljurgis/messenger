@@ -198,6 +198,7 @@ export default function GroupInfo({
                 <Avatar
                   name={member.displayName}
                   id={member.id}
+                  color={member.color}
                   online={member.id !== meId && onlineIds.has(member.id)}
                 />
                 <span className="flex-1 truncate font-medium text-gray-900 dark:text-gray-100">
@@ -246,7 +247,7 @@ export default function GroupInfo({
                         aria-pressed={checked}
                         className="flex w-full items-center gap-3 rounded-xl px-2 py-2 text-left transition-colors hover:bg-gray-50 dark:hover:bg-gray-800"
                       >
-                        <Avatar name={user.displayName} id={user.id} />
+                        <Avatar name={user.displayName} id={user.id} color={user.color} />
                         <span className="flex-1 truncate font-medium text-gray-900 dark:text-gray-100">
                           {user.displayName}
                         </span>

@@ -41,6 +41,7 @@ export function toUserDTO(user: UserRow): UserDTO {
     email: user.email,
     displayName: user.displayName,
     isBot: user.isBot,
+    color: user.color,
   };
 }
 

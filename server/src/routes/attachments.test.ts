@@ -165,6 +165,37 @@ describe('POST /api/chats/:chatId/attachments — upload', () => {
     expect(a.sizeBytes).toBe(junk.length);
   });
 
+  it('classifies mp4/webm as video (no thumbnail, no dimensions)', async () => {
+    const mp4 = randomBytes(2048);
+    const res = await upload(alice, dm, mp4, 'clip.mp4', 'video/mp4');
+    expect(res.status).toBe(201);
+    const a = res.body.attachment as AttachmentDTO;
+    expect(a.kind).toBe('video');
+    expect(a.mimeType).toBe('video/mp4');
+    expect(a.width).toBeNull();
+    expect(a.height).toBeNull();
+    expect(a.hasThumb).toBe(false);
+    expect(a.sizeBytes).toBe(mp4.length);
+
+    const webm = randomBytes(2048);
+    const res2 = await upload(alice, dm, webm, 'clip.webm', 'video/webm');
+    expect(res2.status).toBe(201);
+    const a2 = res2.body.attachment as AttachmentDTO;
+    expect(a2.kind).toBe('video');
+    expect(a2.mimeType).toBe('video/webm');
+  });
+
+  it('classifies any other video/* mime as a plain file (no inline rendering)', async () => {
+    const mov = randomBytes(2048);
+    const res = await upload(alice, dm, mov, 'clip.mov', 'video/quicktime');
+    expect(res.status).toBe(201);
+    const a = res.body.attachment as AttachmentDTO;
+    expect(a.kind).toBe('file');
+    expect(a.mimeType).toBe('video/quicktime');
+    expect(a.width).toBeNull();
+    expect(a.height).toBeNull();
+  });
+
   it('hides the chat from a non-member (404)', async () => {
     const png = await makePng(100, 100);
     const res = await upload(carol, dm, png, 'sneaky.png', 'image/png');
@@ -332,6 +363,112 @@ describe('GET /api/attachments/:id — serving', () => {
     const meta = await sharp(res.body as Buffer).metadata();
     expect(meta.format).toBe('webp');
     expect(Math.max(meta.width ?? 0, meta.height ?? 0)).toBeLessThanOrEqual(512);
+  });
+
+  it('sets Accept-Ranges: bytes on a full (200) response', async () => {
+    const { att } = await uploadAndLink();
+    const res = await bob.agent.get(`/api/attachments/${att.id}`);
+    expect(res.status).toBe(200);
+    expect(res.headers['accept-ranges']).toBe('bytes');
+  });
+
+  it('serves a mid-file byte range as 206 with the exact slice and safety headers', async () => {
+    const { att, png } = await uploadAndLink();
+    const res = await bob.agent
+      .get(`/api/attachments/${att.id}`)
+      .set('Range', 'bytes=10-49')
+      .buffer(true)
+      .parse(binaryParser);
+
+    expect(res.status).toBe(206);
+    expect(res.headers['content-range']).toBe(`bytes 10-49/${png.length}`);
+    expect(res.headers['content-length']).toBe('40');
+    expect(res.headers['x-content-type-options']).toBe('nosniff');
+    expect(res.headers['content-security-policy']).toBe('sandbox');
+    expect((res.body as Buffer).equals(png.subarray(10, 50))).toBe(true);
+  });
+
+  it('serves an open-ended range (bytes=N-) through end of file', async () => {
+    const { att, png } = await uploadAndLink();
+    const start = png.length - 100;
+    const res = await bob.agent
+      .get(`/api/attachments/${att.id}`)
+      .set('Range', `bytes=${start}-`)
+      .buffer(true)
+      .parse(binaryParser);
+
+    expect(res.status).toBe(206);
+    expect(res.headers['content-range']).toBe(`bytes ${start}-${png.length - 1}/${png.length}`);
+    expect((res.body as Buffer).equals(png.subarray(start))).toBe(true);
+  });
+
+  it('serves a suffix range (bytes=-N) for the last N bytes', async () => {
+    const { att, png } = await uploadAndLink();
+    const res = await bob.agent
+      .get(`/api/attachments/${att.id}`)
+      .set('Range', 'bytes=-100')
+      .buffer(true)
+      .parse(binaryParser);
+
+    expect(res.status).toBe(206);
+    const expectedStart = png.length - 100;
+    expect(res.headers['content-range']).toBe(`bytes ${expectedStart}-${png.length - 1}/${png.length}`);
+    expect((res.body as Buffer).equals(png.subarray(expectedStart))).toBe(true);
+  });
+
+  it('rejects an out-of-bounds range with 416 + Content-Range: bytes */size', async () => {
+    const { att, png } = await uploadAndLink();
+    const res = await bob.agent
+      .get(`/api/attachments/${att.id}`)
+      .set('Range', `bytes=${png.length + 1000}-${png.length + 2000}`);
+    expect(res.status).toBe(416);
+    expect(res.headers['content-range']).toBe(`bytes */${png.length}`);
+  });
+
+  it('rejects a malformed Range header with 416', async () => {
+    const { att, png } = await uploadAndLink();
+    const res = await bob.agent.get(`/api/attachments/${att.id}`).set('Range', 'bytes=abc-def');
+    expect(res.status).toBe(416);
+    expect(res.headers['content-range']).toBe(`bytes */${png.length}`);
+  });
+
+  it('serves an mp4 inline (Content-Type video/mp4) with correct 206 byte slice', async () => {
+    const bytes = randomBytes(5000);
+    const up = await upload(alice, group, bytes, 'clip.mp4', 'video/mp4');
+    const att = up.body.attachment as AttachmentDTO;
+    await alice.agent
+      .post(`/api/chats/${group}/messages`)
+      .send({ content: '', attachmentIds: [att.id] });
+
+    const res = await bob.agent
+      .get(`/api/attachments/${att.id}`)
+      .set('Range', 'bytes=0-99')
+      .buffer(true)
+      .parse(binaryParser);
+
+    expect(res.status).toBe(206);
+    expect(res.headers['content-type']).toBe('video/mp4');
+    expect(res.headers['content-range']).toBe(`bytes 0-99/${bytes.length}`);
+    expect((res.body as Buffer).equals(bytes.subarray(0, 100))).toBe(true);
+    // The two safe video types are never forced to download.
+    expect(res.headers['content-disposition']).toBeUndefined();
+  });
+
+  it('keeps an unsafe video/* (kind file) forced to download, even on a 206 partial response', async () => {
+    const bytes = randomBytes(5000);
+    const up = await upload(alice, group, bytes, 'clip.mov', 'video/quicktime');
+    const att = up.body.attachment as AttachmentDTO;
+    await alice.agent
+      .post(`/api/chats/${group}/messages`)
+      .send({ content: '', attachmentIds: [att.id] });
+
+    const res = await bob.agent.get(`/api/attachments/${att.id}`).set('Range', 'bytes=0-99');
+
+    expect(res.status).toBe(206);
+    expect(res.headers['content-type']).toBe('application/octet-stream');
+    expect(res.headers['content-disposition']).toBe('attachment');
+    expect(res.headers['x-content-type-options']).toBe('nosniff');
+    expect(res.headers['content-security-policy']).toBe('sandbox');
   });
 
   it('forces a download with an RFC5987-encoded filename via ?download=1', async () => {
