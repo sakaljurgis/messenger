@@ -196,6 +196,36 @@ describe('POST /api/chats/:chatId/attachments — upload', () => {
     expect(a.height).toBeNull();
   });
 
+  it('rescues a .mov reported as octet-stream via the extension fallback', async () => {
+    // Re-downloaded/re-uploaded videos commonly arrive with a useless mime —
+    // the extension decides, and the STORED mime is fixed up so playback gets
+    // a real video/* Content-Type.
+    const mov = randomBytes(2048);
+    const res = await upload(alice, dm, mov, 'clip.mov', 'application/octet-stream');
+    expect(res.status).toBe(201);
+    const a = res.body.attachment as AttachmentDTO;
+    expect(a.kind).toBe('video');
+    expect(a.mimeType).toBe('video/quicktime');
+  });
+
+  it('strips codec parameters and lowercases the reported mime', async () => {
+    const mp4 = randomBytes(2048);
+    const res = await upload(alice, dm, mp4, 'clip.mp4', 'video/mp4; codecs="avc1.42E01E"');
+    expect(res.status).toBe(201);
+    const a = res.body.attachment as AttachmentDTO;
+    expect(a.kind).toBe('video');
+    expect(a.mimeType).toBe('video/mp4');
+  });
+
+  it('leaves a non-video octet-stream upload as a plain file', async () => {
+    const blob = randomBytes(2048);
+    const res = await upload(alice, dm, blob, 'data.bin', 'application/octet-stream');
+    expect(res.status).toBe(201);
+    const a = res.body.attachment as AttachmentDTO;
+    expect(a.kind).toBe('file');
+    expect(a.mimeType).toBe('application/octet-stream');
+  });
+
   it('classifies any other video/* mime as a plain file (no inline rendering)', async () => {
     const avi = randomBytes(2048);
     const res = await upload(alice, dm, avi, 'clip.avi', 'video/x-msvideo');

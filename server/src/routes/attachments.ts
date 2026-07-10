@@ -38,6 +38,36 @@ const IMAGE_MIMES = new Set([
  */
 const VIDEO_MIMES = new Set(['video/mp4', 'video/webm', 'video/quicktime']);
 
+/**
+ * Extension → mime fallback for the inline-safe video types. Browsers derive a
+ * file's type from the OS extension registry, and outside Apple platforms (or
+ * for freshly re-downloaded files) a .mov commonly arrives as '' or
+ * 'application/octet-stream' — which would wrongly demote it to a download
+ * card. Only these known video extensions are ever upgraded; everything else
+ * keeps whatever the browser said.
+ */
+const VIDEO_EXT_MIMES: Record<string, string> = {
+  '.mp4': 'video/mp4',
+  '.m4v': 'video/mp4',
+  '.webm': 'video/webm',
+  '.mov': 'video/quicktime',
+};
+
+/**
+ * Normalize the browser-reported mime (lowercase, parameters like `;codecs=`
+ * stripped); when it's missing/generic, fall back to the filename extension
+ * for the known video types. The result is what gets STORED — playback needs
+ * a real video/* Content-Type, so kind alone wouldn't be enough.
+ */
+function effectiveMimeType(reported: string, originalName: string): string {
+  const normalized = (reported ?? '').split(';')[0]!.trim().toLowerCase();
+  if (normalized === '' || normalized === 'application/octet-stream') {
+    const ext = path.extname(originalName).toLowerCase();
+    return VIDEO_EXT_MIMES[ext] ?? normalized;
+  }
+  return normalized;
+}
+
 const CHAT_NOT_FOUND = { error: 'Chat not found' };
 const NOT_FOUND = { error: 'Not found' };
 
@@ -140,10 +170,10 @@ export function attachmentsRouter(db: Db, storage: Storage): Router {
         }
 
         const storedName = file.filename;
-        const mimeType = file.mimetype;
         // multer hands back originalname as latin1 bytes — re-decode to utf8.
         const decoded = Buffer.from(file.originalname, 'latin1').toString('utf8');
         const originalName = path.basename(decoded).slice(0, 200) || 'file';
+        const mimeType = effectiveMimeType(file.mimetype, originalName);
 
         // Videos get no thumbnail/dimensions (sharp never runs on them) — just
         // the kind tag so the client knows to render an inline <video>.

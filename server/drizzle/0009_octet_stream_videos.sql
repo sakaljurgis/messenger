@@ -1,0 +1,3 @@
+UPDATE `attachments` SET `kind` = 'video', `mime_type` = 'video/quicktime' WHERE (`mime_type` = '' OR `mime_type` = 'application/octet-stream') AND lower(`original_name`) LIKE '%.mov';--> statement-breakpoint
+UPDATE `attachments` SET `kind` = 'video', `mime_type` = 'video/mp4' WHERE (`mime_type` = '' OR `mime_type` = 'application/octet-stream') AND (lower(`original_name`) LIKE '%.mp4' OR lower(`original_name`) LIKE '%.m4v');--> statement-breakpoint
+UPDATE `attachments` SET `kind` = 'video', `mime_type` = 'video/webm' WHERE (`mime_type` = '' OR `mime_type` = 'application/octet-stream') AND lower(`original_name`) LIKE '%.webm';

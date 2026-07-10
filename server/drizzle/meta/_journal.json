@@ -64,6 +64,13 @@
       "when": 1783700000002,
       "tag": "0008_quicktime_video",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1783700000003,
+      "tag": "0009_octet_stream_videos",
+      "breakpoints": true
     }
   ]
 }
