@@ -799,6 +799,38 @@ describe('ChatPage', () => {
     expect(screen.getByRole('menu').className).toContain('right-0');
   });
 
+  it('flips the popover above the bubble when it would clip the bottom of the scroll area', async () => {
+    stubFetch({ messages: [msg(1, bob, 'low on screen'), msg(2, me, 'high on screen')] });
+    renderChatPage();
+
+    await screen.findByText('low on screen');
+
+    // Fake the geometry jsdom doesn't compute: the scroll area occupies
+    // y=0..640, the menu measures 160px tall, and the first bubble sits near
+    // the bottom (no room below, plenty above) while the second sits at the
+    // top (plenty of room below).
+    const offsetHeightSpy = vi
+      .spyOn(HTMLElement.prototype, 'offsetHeight', 'get')
+      .mockReturnValue(160);
+    const rect = (top: number, bottom: number) =>
+      ({ top, bottom, left: 0, right: 0, width: 0, height: bottom - top }) as DOMRect;
+    screen.getByTestId('message-scroll').getBoundingClientRect = () => rect(0, 640);
+
+    const lowWrap = screen.getByText('low on screen').closest('.group') as HTMLElement;
+    lowWrap.getBoundingClientRect = () => rect(600, 620);
+    await userEvent.click(within(lowWrap).getByLabelText('Message actions'));
+    expect(screen.getByRole('menu').className).toContain('bottom-full');
+    await userEvent.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument());
+
+    const highWrap = screen.getByText('high on screen').closest('.group') as HTMLElement;
+    highWrap.getBoundingClientRect = () => rect(20, 40);
+    await userEvent.click(within(highWrap).getByLabelText('Message actions'));
+    expect(screen.getByRole('menu').className).toContain('top-full');
+
+    offsetHeightSpy.mockRestore();
+  });
+
   it('places the hidden actions button inward so it never indents a bubble', async () => {
     stubFetch({ messages: [msg(1, bob, 'Hi from Bob'), msg(2, me, 'Hi from me')] });
     renderChatPage();

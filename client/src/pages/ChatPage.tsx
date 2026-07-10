@@ -62,6 +62,9 @@ function DownArrowIcon() {
 /** How long a touch must be held before the actions menu opens (mobile long-press). */
 const LONG_PRESS_MS = 500;
 
+/** Gap between a bubble and its actions popover (the mt-1/mb-1 spacing). */
+const MENU_GAP_PX = 4;
+
 /** A deleted message: a muted, italic outline bubble with no fill and no menu. */
 function TombstoneBubble() {
   return (
@@ -105,8 +108,34 @@ function MessageActions({
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
+  // Flipped true when the popover would clip the bottom of the visible message
+  // area (bubbles low on screen) and there's room above the bubble instead.
+  const [openUp, setOpenUp] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   const timerRef = useRef<number | null>(null);
+
+  // Measure after the popover renders but before paint: the popover lives
+  // inside the chat's scroll container, so opening past its bottom edge doesn't
+  // overlay the composer — it extends the scroll area and lands out of view.
+  // The usable bottom is therefore the scroll container's edge, further capped
+  // by the visual viewport (innerHeight lies when the mobile keyboard is up).
+  useLayoutEffect(() => {
+    if (!open) return;
+    const wrap = wrapRef.current;
+    const menu = menuRef.current;
+    if (!wrap || !menu) return;
+    const wrapRect = wrap.getBoundingClientRect();
+    const menuHeight = menu.offsetHeight + MENU_GAP_PX;
+    const scrollRect = wrap.closest('[data-testid="message-scroll"]')?.getBoundingClientRect();
+    const viewportBottom = window.visualViewport?.height ?? window.innerHeight;
+    const bottomLimit = scrollRect ? Math.min(scrollRect.bottom, viewportBottom) : viewportBottom;
+    const topLimit = scrollRect ? Math.max(scrollRect.top, 0) : 0;
+    const clipsBelow = wrapRect.bottom + menuHeight > bottomLimit;
+    const fitsAbove = wrapRect.top - menuHeight >= topLimit;
+    setOpenUp(clipsBelow && fitsAbove);
+    return () => setOpenUp(false);
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -170,10 +199,11 @@ function MessageActions({
       {!isMine && dotsButton}
       {open && (
         <div
+          ref={menuRef}
           role="menu"
-          className={`absolute top-full z-10 mt-1 min-w-[8rem] overflow-hidden rounded-xl border border-gray-200 bg-white py-1 shadow-lg dark:border-gray-700 dark:bg-gray-800 ${
+          className={`absolute z-10 min-w-[8rem] overflow-hidden rounded-xl border border-gray-200 bg-white py-1 shadow-lg dark:border-gray-700 dark:bg-gray-800 ${
             isMine ? 'right-0' : 'left-0'
-          }`}
+          } ${openUp ? 'bottom-full mb-1' : 'top-full mt-1'}`}
         >
           <div className="flex gap-0.5 px-1.5 py-1">
             {REACTION_EMOJIS.map((emoji) => (
