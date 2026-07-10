@@ -76,7 +76,9 @@ daily use. See [PLAN.md](PLAN.md) for the architecture history and
   human message (see [examples/README.md](examples/README.md))
 - Interactive actions: a bot can attach up to six buttons to a message;
   tapping one calls the bot's webhook back — enough for confirmations,
-  menus, and quick-reply workflows
+  menus, and quick-reply workflows. Actions are one-shot: the first tap
+  becomes a visible "✓ choice — member" record for everyone
+- Bots can schedule, list, and cancel send-later messages of their own
 
 **PWA & ops**
 - Installable, offline app shell, hand-rolled service worker

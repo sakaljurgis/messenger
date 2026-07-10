@@ -1,10 +1,16 @@
 import { and, eq } from 'drizzle-orm';
 import { Router, type RequestHandler } from 'express';
 import { z } from 'zod';
-import { createMessage } from '../chats/service.js';
+import { createMessage, getChatForMember } from '../chats/service.js';
 import type { Db } from '../db/index.js';
 import { users } from '../db/schema.js';
 import type { ChatEvents } from '../events.js';
+import {
+  createScheduledMessage,
+  deleteScheduledForSender,
+  listScheduledForSender,
+  parseId,
+} from '../scheduled-service.js';
 
 /**
  * The inbound bot API (mounted at /api/bot in app.ts). Authenticated by
@@ -32,6 +38,9 @@ const sendSchema = z
     content: z.string().trim().max(4000).optional().default(''),
     mentions: z.array(z.number().int().positive()).optional(),
     attachmentIds: z.array(z.number().int().positive()).optional(),
+    // Reply target: must be a live message in the same chat (createMessage
+    // enforces it → 'invalid-reply' → 400). Optional, same as the human path.
+    replyToId: z.number().int().positive().optional(),
     // Action buttons (bots only): at most 6, with unique ids.
     actions: z
       .array(actionSchema)
@@ -100,6 +109,7 @@ export function botApiRouter(db: Db, events: ChatEvents): Router {
       content: parsed.data.content,
       mentions: parsed.data.mentions,
       attachmentIds: parsed.data.attachmentIds,
+      replyToId: parsed.data.replyToId,
       actions: parsed.data.actions,
     });
     if (!result.ok) {
@@ -107,10 +117,75 @@ export function botApiRouter(db: Db, events: ChatEvents): Router {
         res.status(400).json({ error: 'Invalid attachments' });
         return;
       }
+      if (result.reason === 'invalid-reply') {
+        res.status(400).json({ error: 'Invalid reply target' });
+        return;
+      }
       res.status(404).json({ error: 'Chat not found' });
       return;
     }
     res.status(201).json({ message: result.message });
+  });
+
+  // ── Scheduled ("send later") messages ──────────────────────────────────────
+  // The Bearer-auth mirror of /api/chats/:id/scheduled. Chat id travels in the
+  // body (POST) or query (GET) since bot routes aren't chat-scoped; the shared
+  // scheduled-service enforces the same validation/bounds/cap as the human path.
+  // "Adjusting" a schedule is DELETE + POST — there is no PATCH.
+
+  // POST /api/bot/scheduled — queue a send-later message (BotScheduleMessageRequest).
+  router.post('/scheduled', (req, res) => {
+    const chatId = parseId((req.body as { chatId?: unknown })?.chatId);
+    if (chatId === null) {
+      res.status(400).json({ error: 'chatId is required' });
+      return;
+    }
+    // Membership check (404, no existence leak) before any body validation, just
+    // like the human route resolves the path's chat before parsing.
+    const chat = getChatForMember(db, chatId, req.bot!.id);
+    if (!chat) {
+      res.status(404).json({ error: 'Chat not found' });
+      return;
+    }
+
+    const result = createScheduledMessage(db, chat.id, req.bot!.id, req.body);
+    if (!result.ok) {
+      res.status(result.status).json({ error: result.error });
+      return;
+    }
+    res.status(201).json({ scheduled: result.dto });
+  });
+
+  // GET /api/bot/scheduled?chatId=<id> — the bot's OWN pending rows for a chat,
+  // soonest first. chatId is required (400 without it); non-member → 404.
+  router.get('/scheduled', (req, res) => {
+    const chatId = parseId(req.query.chatId);
+    if (chatId === null) {
+      res.status(400).json({ error: 'chatId query parameter is required' });
+      return;
+    }
+    const chat = getChatForMember(db, chatId, req.bot!.id);
+    if (!chat) {
+      res.status(404).json({ error: 'Chat not found' });
+      return;
+    }
+    res.status(200).json({ scheduled: listScheduledForSender(db, chat.id, req.bot!.id) });
+  });
+
+  // DELETE /api/bot/scheduled/:id — cancel the bot's OWN pending row (204).
+  // Chat-agnostic: keyed only by the row id + this bot, so another bot's or a
+  // human's row is a 404 (no leak of whether the id exists elsewhere).
+  router.delete('/scheduled/:id', (req, res) => {
+    const scheduledId = parseId(req.params.id);
+    if (scheduledId === null) {
+      res.status(404).json({ error: 'Scheduled message not found' });
+      return;
+    }
+    if (!deleteScheduledForSender(db, scheduledId, req.bot!.id)) {
+      res.status(404).json({ error: 'Scheduled message not found' });
+      return;
+    }
+    res.status(204).end();
   });
 
   return router;

@@ -120,15 +120,44 @@ export function parseActions(raw: string | null): MessageActionDTO[] | undefined
 }
 
 /**
+ * Parses the raw `messages.action_taken` JSON column into the compact
+ * {@link MessageDTO.actionTaken} shape. Like {@link parseActions} it NEVER
+ * throws: a null column, malformed JSON, or a value missing a string `actionId`
+ * / numeric `userId` all collapse to `undefined` (the DTO field is absent).
+ * Only `actionId` and `userId` are surfaced — the persisted `at` timestamp is
+ * an internal detail and is stripped.
+ */
+export function parseActionTaken(
+  raw: string | null,
+): { actionId: string; userId: number } | undefined {
+  if (raw === null) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      parsed === null ||
+      typeof parsed !== 'object' ||
+      typeof (parsed as { actionId: unknown }).actionId !== 'string' ||
+      typeof (parsed as { userId: unknown }).userId !== 'number'
+    ) {
+      return undefined;
+    }
+    const { actionId, userId } = parsed as { actionId: string; userId: number };
+    return { actionId, userId };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Maps a message row (+ its resolved sender, mention user ids and attachments)
  * to the API shape. `createdAt` is a Date from the drizzle timestamp column →
  * ISO string over the wire. `attachments` defaults to empty for plain messages.
  *
  * Deleted messages serialize as a tombstone: the original text, mentions,
- * attachments, reactions, reply reference, link preview and action buttons are
- * dropped (`content: ''`, all lists empty, `replyTo: null`, `linkPreview: null`,
- * `actions` absent, `editedAt: null`) so a deleted message can never leak its
- * former contents —
+ * attachments, reactions, reply reference, link preview and action buttons (plus
+ * any one-shot resolution record) are dropped (`content: ''`, all lists empty,
+ * `replyTo: null`, `linkPreview: null`, `actions`/`actionTaken` absent,
+ * `editedAt: null`) so a deleted message can never leak its former contents —
  * even though the underlying `link_preview` column, like `content`, is left
  * untouched by the soft-delete itself (see chats/service#deleteMessage).
  * `replyTo`, when present, is the target's snapshot.
@@ -156,6 +185,9 @@ export function toMessageDTO(
     // Bot action buttons: absent for humans (null column) and always dropped on
     // a tombstone — matching the rest of the tombstone neutering above.
     actions: isDeleted ? undefined : parseActions(message.actions),
+    // The one-shot resolution record ({ actionId, userId }): present once a
+    // member tapped, absent while still tappable, and dropped on a tombstone.
+    actionTaken: isDeleted ? undefined : parseActionTaken(message.actionTaken),
     editedAt: isDeleted || message.editedAt === null ? null : message.editedAt.toISOString(),
     isDeleted,
   };

@@ -459,24 +459,34 @@ export interface TriggerActionParams {
  * routes/chats.ts): `not-member`→404 (no existence leak), `not-found`→404,
  * `deleted`→400 (a tombstone dropped its actions), `unknown-action`→404 (the
  * message doesn't carry that actionId — also covers non-bot / no-action
- * messages, whose `actions` column is null), `bot-unavailable`→400 (the sender
- * is not a live bot with a webhook, so nothing could receive the callback).
+ * messages, whose `actions` column is null), `already-taken`→409 (the action
+ * is one-shot — some member already tapped it), `bot-unavailable`→400 (the
+ * sender is not a live bot with a webhook, so nothing could receive the callback).
  */
 export type TriggerActionResult =
   | { ok: true }
   | {
       ok: false;
-      reason: 'not-member' | 'not-found' | 'deleted' | 'unknown-action' | 'bot-unavailable';
+      reason:
+        | 'not-member'
+        | 'not-found'
+        | 'deleted'
+        | 'unknown-action'
+        | 'already-taken'
+        | 'bot-unavailable';
     };
 
 /**
  * Handles a tap on a bot message's action button: validates that the caller is
  * a member, the message lives in this chat and isn't a tombstone, it actually
- * carries the tapped `actionId`, and it was sent by a still-alive bot with a
- * `webhookUrl`. On success emits `action:triggered` on the shared bus (the
- * webhook subscriber POSTs the callback to the bot, fire-and-forget) and
- * returns `{ ok: true }` — the route replies 204 immediately without waiting on
- * delivery. No message is written; this is a pure fan-out trigger.
+ * carries the tapped `actionId`, has not already been resolved (actions are
+ * ONE-SHOT), and was sent by a still-alive bot with a `webhookUrl`. On success
+ * it atomically CLAIMS the message's `actionTaken` (first tap wins; a lost race
+ * → `already-taken`), then emits both `action:triggered` (the webhook subscriber
+ * POSTs the callback to the bot, fire-and-forget) and `message:updated` (the
+ * socket relay live-swaps the buttons for a record line on every member's
+ * client) on the shared bus, returning `{ ok: true }` — the route replies 204
+ * immediately without waiting on delivery.
  */
 export function triggerAction(
   db: Db,
@@ -496,6 +506,11 @@ export function triggerAction(
   const action = parseActions(message.actions)?.find((a) => a.id === actionId);
   if (!action) return { ok: false, reason: 'unknown-action' };
 
+  // One-shot: any further tap (same or different member/action) after the first
+  // is rejected. The definitive guard is the atomic claim below; this is the
+  // early-out for the common already-resolved case.
+  if (message.actionTaken !== null) return { ok: false, reason: 'already-taken' };
+
   // Deliverable only when the sender is a bot that still exists and has a
   // webhook — a since-deleted bot (deletedAt set, apiToken revoked) or a bot
   // that never had a webhookUrl can't receive the callback.
@@ -507,13 +522,30 @@ export function triggerAction(
   const tapper = db.select().from(users).where(eq(users.id, userId)).get();
   if (!tapper) return { ok: false, reason: 'not-member' };
 
+  // Atomically claim the action: only the writer that finds `action_taken` still
+  // NULL wins. better-sqlite3 is synchronous, so a concurrent tap is serialized
+  // and would already have seen a non-null column above; the `IS NULL` guard is
+  // the race-proof backstop — RETURNING yields no row (undefined) on a lost
+  // race, which we treat identically to the early-out (409).
+  const claimed = db
+    .update(messages)
+    .set({ actionTaken: JSON.stringify({ actionId, userId, at: Date.now() }) })
+    .where(and(eq(messages.id, message.id), isNull(messages.actionTaken)))
+    .returning()
+    .get();
+  if (!claimed) return { ok: false, reason: 'already-taken' };
+
+  // The freshly-claimed row carries `actionTaken`, so this DTO does too — it
+  // rides BOTH the webhook callback and the live `message:updated` swap.
+  const dto = messageDTOFromRow(db, claimed);
   events.emit('action:triggered', {
     bot: sender,
     actionId,
-    message: messageDTOFromRow(db, message),
+    message: dto,
     user: toUserDTO(tapper),
     chat,
   });
+  events.emit('message:updated', { message: dto, chat, memberIds: getMemberIds(db, chat.id) });
   return { ok: true };
 }
 

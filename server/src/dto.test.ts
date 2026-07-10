@@ -39,6 +39,7 @@ function makeMessage(overrides: Partial<MessageRow> = {}): MessageRow {
     replyToId: null,
     linkPreview: null,
     actions: null,
+    actionTaken: null,
     createdAt: new Date(),
     editedAt: null,
     deletedAt: null,
@@ -192,6 +193,53 @@ describe('toMessageDTO', () => {
       [],
     );
     expect(dto.actions).toBeUndefined();
+    expect(dto.isDeleted).toBe(true);
+  });
+
+  it('actionTaken is absent when the action_taken column is null (still tappable)', () => {
+    const dto = toMessageDTO(makeMessage({ actionTaken: null }), makeUser(), []);
+    expect(dto.actionTaken).toBeUndefined();
+  });
+
+  it('parses action_taken into { actionId, userId }, stripping the persisted `at`', () => {
+    const dto = toMessageDTO(
+      makeMessage({ actionTaken: JSON.stringify({ actionId: 'yes', userId: 7, at: 1_700_000 }) }),
+      makeUser(),
+      [],
+    );
+    expect(dto.actionTaken).toEqual({ actionId: 'yes', userId: 7 });
+  });
+
+  it('never throws on malformed action_taken JSON — collapses to absent', () => {
+    const dto = toMessageDTO(makeMessage({ actionTaken: '{not valid json' }), makeUser(), []);
+    expect(dto.actionTaken).toBeUndefined();
+  });
+
+  it('collapses an action_taken value with a missing/mistyped field to absent', () => {
+    const badActionId = toMessageDTO(
+      makeMessage({ actionTaken: JSON.stringify({ actionId: 5, userId: 7 }) }),
+      makeUser(),
+      [],
+    );
+    expect(badActionId.actionTaken).toBeUndefined();
+    const badUserId = toMessageDTO(
+      makeMessage({ actionTaken: JSON.stringify({ actionId: 'yes' }) }),
+      makeUser(),
+      [],
+    );
+    expect(badUserId.actionTaken).toBeUndefined();
+  });
+
+  it('a tombstone never carries actionTaken, even when the column has data', () => {
+    const dto = toMessageDTO(
+      makeMessage({
+        actionTaken: JSON.stringify({ actionId: 'yes', userId: 7, at: 1 }),
+        deletedAt: new Date(),
+      }),
+      makeUser(),
+      [],
+    );
+    expect(dto.actionTaken).toBeUndefined();
     expect(dto.isDeleted).toBe(true);
   });
 });

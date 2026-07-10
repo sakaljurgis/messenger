@@ -129,6 +129,12 @@ export const messages = sqliteTable(
      * human messages and for bot messages without actions.
      */
     actions: text('actions'),
+    /**
+     * JSON-serialized { actionId, userId, at } once a member tapped one of
+     * the actions (one-shot; set exactly once, first tap wins); null while
+     * the buttons are still live.
+     */
+    actionTaken: text('action_taken'),
   },
   (t) => [index('messages_chat_idx').on(t.chatId, t.id)],
 );

@@ -36,6 +36,7 @@ import Avatar from '../components/Avatar';
 import Composer from '../components/Composer';
 import GroupInfo from '../components/GroupInfo';
 import Lightbox from '../components/Lightbox';
+import VoiceNotePlayer from '../components/VoiceNotePlayer';
 
 const NEAR_BOTTOM_PX = 100;
 
@@ -388,6 +389,34 @@ function MessageActionButtons({
   );
 }
 
+/**
+ * The one-shot "gravestone": replaces a bot message's action buttons the moment
+ * one is tapped (actions resolve exactly once, first tap wins server-side). A
+ * subdued single line in the buttons' old spot, e.g. "✓ 👍 — Jurgis". The
+ * tapped action's label is resolved from the message's own `actions` by id
+ * (falling back to the raw id if that action has since vanished), and the
+ * tapper's name from the chat members (falling back to 'Someone' if they've
+ * left).
+ */
+function ActionRecord({
+  actionTaken,
+  actions,
+  members,
+}: {
+  actionTaken: { actionId: string; userId: number };
+  actions: MessageActionDTO[];
+  members: UserDTO[];
+}) {
+  const label = actions.find((a) => a.id === actionTaken.actionId)?.label ?? actionTaken.actionId;
+  const name = members.find((m) => m.id === actionTaken.userId)?.displayName ?? 'Someone';
+  return (
+    <div
+      data-testid="action-record"
+      className="mt-1 text-xs text-gray-400 dark:text-gray-500"
+    >{`✓ ${label} — ${name}`}</div>
+  );
+}
+
 /** Precomputed per-message layout: run grouping + day breaks. */
 interface Row {
   message: MessageDTO;
@@ -527,25 +556,6 @@ function AttachmentVideo({ video, isMine }: { video: AttachmentDTO; isMine: bool
 }
 
 /**
- * An 'audio' attachment (voice notes and the browser-safe audio mimes — see
- * AttachmentKind): an inline `<audio>` with native controls (which supply the
- * duration/scrubber), on its own block — never inside the image grid. A fixed
- * width keeps a bare player from stretching edge to edge; `preload="metadata"`
- * fetches just enough (via the Range-enabled endpoint) to know the duration.
- */
-function AttachmentAudio({ audio }: { audio: AttachmentDTO }) {
-  return (
-    <audio
-      controls
-      preload="metadata"
-      src={attachmentUrl(audio.id)}
-      data-testid="audio-attachment"
-      className="w-64 max-w-full"
-    />
-  );
-}
-
-/**
  * Non-image attachment: a download card styled like the message bubble. A PDF
  * is the one exception — the server serves it inline (Content-Disposition:
  * inline), so instead of forcing a download it opens in a new tab in the
@@ -656,7 +666,7 @@ function MessageStack({
         <AttachmentVideo key={v.id} video={v} isMine={isMine} />
       ))}
       {audios.map((a) => (
-        <AttachmentAudio key={a.id} audio={a} />
+        <VoiceNotePlayer key={a.id} audio={a} />
       ))}
       {files.map((f) => (
         <AttachmentFile key={f.id} file={f} isMine={isMine} />
@@ -668,8 +678,19 @@ function MessageStack({
         </div>
       )}
       {message.linkPreview && <LinkPreviewCard preview={message.linkPreview} />}
-      {message.actions && message.actions.length > 0 && (
-        <MessageActionButtons actions={message.actions} onTrigger={onTriggerAction} />
+      {message.actionTaken ? (
+        // One-shot: once tapped, the buttons are permanently replaced by a
+        // record line for every member (delivered live via message:updated).
+        <ActionRecord
+          actionTaken={message.actionTaken}
+          actions={message.actions ?? []}
+          members={members}
+        />
+      ) : (
+        message.actions &&
+        message.actions.length > 0 && (
+          <MessageActionButtons actions={message.actions} onTrigger={onTriggerAction} />
+        )
       )}
     </div>
   );
@@ -1475,14 +1496,17 @@ export default function ChatPage() {
 
   /**
    * Tap a bot message's action button: POST { actionId } (204). Fire-and-forget
-   * — the bot's reply arrives over the socket, so a failure just re-enables the
-   * button (swallowed here; MessageActionButtons clears its busy flag). Returns
-   * the promise so the button can track its own in-flight/busy state.
+   * — actions are one-shot, so the real feedback is the `message:updated` that
+   * flips the buttons to a record line for everyone. A 409 ('Action already
+   * taken', someone tapped first) is swallowed just like any transient error:
+   * no UI error surfaces, and the incoming message:updated renders the record
+   * naturally. Returns the promise so the button tracks its own in-flight/busy
+   * state (which clears on completion, success OR failure).
    */
   function handleTriggerAction(messageId: number, actionId: string): Promise<void> {
     return apiPost<void>(`/api/chats/${chatId}/messages/${messageId}/actions`, { actionId }).catch(
       () => {
-        /* transient failure — the button re-enables; the bot's reply is the real feedback */
+        /* one-shot 409 or transient failure — the record arrives via message:updated */
       },
     );
   }

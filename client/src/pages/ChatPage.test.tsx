@@ -478,16 +478,17 @@ describe('ChatPage', () => {
     expect(grid?.querySelector('video')).toBeNull();
   });
 
-  it('renders an audio attachment as an inline <audio> player with the right src', async () => {
+  it('renders an audio attachment as the custom voice-note player, lazily (no fetch on mount)', async () => {
     const audioMsg: MessageDTO = { ...msg(1, bob, ''), attachments: [audioAttachment(88)] };
-    stubFetch({ messages: [audioMsg] });
+    const fetchMock = stubFetch({ messages: [audioMsg] });
     renderChatPage();
 
-    const audio = await screen.findByTestId('audio-attachment');
-    expect(audio.tagName).toBe('AUDIO');
-    expect(audio.getAttribute('src')).toBe('/api/attachments/88');
-    expect(audio.hasAttribute('controls')).toBe(true);
-    expect(audio.getAttribute('preload')).toBe('metadata');
+    // The stock <audio> is gone; the bubble is our custom player with a play button.
+    const player = await screen.findByTestId('voice-note-player');
+    expect(within(player).getByRole('button', { name: 'Play voice note' })).toBeInTheDocument();
+
+    // Lazy: the attachment bytes are NOT downloaded until the user taps play.
+    expect(fetchMock).not.toHaveBeenCalledWith('/api/attachments/88');
   });
 
   it('renders audio as its own block, never inside the image grid', async () => {
@@ -498,12 +499,12 @@ describe('ChatPage', () => {
     stubFetch({ messages: [mixedMsg] });
     const { container } = renderChatPage();
 
-    const audio = await screen.findByTestId('audio-attachment');
-    expect(audio.closest('.grid')).toBeNull();
+    const player = await screen.findByTestId('voice-note-player');
+    expect(player.closest('.grid')).toBeNull();
 
     const grid = container.querySelector('.grid');
     expect(grid?.querySelectorAll('img')).toHaveLength(2);
-    expect(grid?.querySelector('audio')).toBeNull();
+    expect(grid?.querySelector('[data-testid="voice-note-player"]')).toBeNull();
   });
 
   it('renders a non-PDF file attachment as a download card (unchanged behavior)', async () => {
@@ -2181,6 +2182,94 @@ describe('ChatPage', () => {
       release();
       await waitFor(() => expect(button).not.toBeDisabled());
       expect(actionCalls()).toHaveLength(1);
+    });
+
+    it('renders the one-shot record line instead of the buttons once taken', async () => {
+      const resolved: MessageDTO = {
+        ...actionMsg(5, 'Pick:', [
+          { id: 'up', label: '👍' },
+          { id: 'down', label: '👎' },
+        ]),
+        actionTaken: { actionId: 'up', userId: bob.id },
+      };
+      stubFetch({ messages: [resolved] });
+      renderChatPage();
+
+      const record = await screen.findByTestId('action-record');
+      // The tapped action's label + the tapper's member name are resolved.
+      expect(record).toHaveTextContent('👍');
+      expect(record).toHaveTextContent('Bob');
+      // The buttons themselves are gone (neither the tapped nor the other).
+      expect(screen.queryByRole('button', { name: '👍' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: '👎' })).not.toBeInTheDocument();
+    });
+
+    it('falls back to the raw actionId and "Someone" when action/member are gone', async () => {
+      const resolved: MessageDTO = {
+        ...actionMsg(5, 'Pick:', [{ id: 'up', label: '👍' }]),
+        // 'gone' isn't among the actions; user 999 isn't a chat member.
+        actionTaken: { actionId: 'gone', userId: 999 },
+      };
+      stubFetch({ messages: [resolved] });
+      renderChatPage();
+
+      const record = await screen.findByTestId('action-record');
+      expect(record).toHaveTextContent('gone');
+      expect(record).toHaveTextContent('Someone');
+    });
+
+    it('live-flips buttons to the record line on a message:updated after a tap', async () => {
+      stubFetch({
+        messages: [actionMsg(5, 'Pick:', [{ id: 'yes', label: 'Yes', style: 'primary' }])],
+      });
+      renderChatPage();
+
+      await userEvent.click(await screen.findByRole('button', { name: 'Yes' }));
+
+      // The server claims the action and relays the resolved message.
+      await emitFromServer('message:updated', {
+        ...actionMsg(5, 'Pick:', [{ id: 'yes', label: 'Yes', style: 'primary' }]),
+        actionTaken: { actionId: 'yes', userId: bob.id },
+      });
+
+      await waitFor(() =>
+        expect(screen.queryByRole('button', { name: 'Yes' })).not.toBeInTheDocument(),
+      );
+      const record = screen.getByTestId('action-record');
+      expect(record).toHaveTextContent('Yes');
+      expect(record).toHaveTextContent('Bob');
+    });
+
+    it('a 409 (someone tapped first) surfaces no error and disables while in flight', async () => {
+      let release!: () => void;
+      const pending = new Promise<Response>((resolve) => {
+        release = () => resolve(jsonResponse(409, { error: 'Action already taken' }));
+      });
+      stubFetch({
+        messages: [actionMsg(5, 'Pick:', [{ id: 'yes', label: 'Yes' }])],
+        onAction: () => pending,
+      });
+      renderChatPage();
+
+      const button = await screen.findByRole('button', { name: 'Yes' });
+      await userEvent.click(button);
+      // Disabled while the tap is in flight (the per-button busy guard).
+      expect(button).toBeDisabled();
+
+      // The 409 resolves; it's swallowed (no thrown error) and the button re-enables.
+      release();
+      await waitFor(() => expect(button).not.toBeDisabled());
+      expect(screen.getByRole('button', { name: 'Yes' })).toBeInTheDocument();
+
+      // The record still arrives naturally over the socket (whoever won the race).
+      await emitFromServer('message:updated', {
+        ...actionMsg(5, 'Pick:', [{ id: 'yes', label: 'Yes' }]),
+        actionTaken: { actionId: 'yes', userId: bob.id },
+      });
+      await waitFor(() =>
+        expect(screen.queryByRole('button', { name: 'Yes' })).not.toBeInTheDocument(),
+      );
+      expect(screen.getByTestId('action-record')).toHaveTextContent('Bob');
     });
   });
 });

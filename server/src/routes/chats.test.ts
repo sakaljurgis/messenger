@@ -18,6 +18,7 @@ import {
   type ChatNewEvent,
   type ChatUpdatedEvent,
   type MessageNewEvent,
+  type MessageUpdatedEvent,
   type ReadUpdatedEvent,
 } from '../events.js';
 
@@ -972,6 +973,92 @@ describe('POST /api/chats/:id/messages/:messageId/actions — tap a bot action',
       .send({ actionId: 'ok' });
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('Bot unavailable');
+  });
+
+  it('first tap claims the action: 204, persists actionTaken, emits message:updated + webhook', async () => {
+    const triggered: ActionTriggeredEvent[] = [];
+    const updated: MessageUpdatedEvent[] = [];
+    events.on('action:triggered', (e) => triggered.push(e));
+    events.on('message:updated', (e) => updated.push(e));
+
+    const res = await alice.agent
+      .post(`/api/chats/${groupId}/messages/${actionMsg.id}/actions`)
+      .send({ actionId: 'yes' });
+    expect(res.status).toBe(204);
+
+    // The webhook event still fires, and its embedded DTO now carries the record.
+    expect(triggered).toHaveLength(1);
+    expect(triggered[0]!.message.actionTaken).toEqual({ actionId: 'yes', userId: alice.user.id });
+
+    // A message:updated rode the bus carrying the freshly-claimed record so the
+    // socket relay can live-swap the buttons for a record line.
+    expect(updated).toHaveLength(1);
+    expect(updated[0]!.message.id).toBe(actionMsg.id);
+    expect(updated[0]!.message.actionTaken).toEqual({ actionId: 'yes', userId: alice.user.id });
+    // The buttons persist on the DTO (only the client swaps them for the record).
+    expect(updated[0]!.message.actions).toHaveLength(2);
+
+    // GET history shows it persisted; the internal `at` never leaks over the wire.
+    const page = await alice.agent.get(`/api/chats/${groupId}/messages`);
+    const persisted = (page.body.messages as MessageDTO[]).find((m) => m.id === actionMsg.id)!;
+    expect(persisted.actionTaken).toEqual({ actionId: 'yes', userId: alice.user.id });
+  });
+
+  it('is one-shot: a second tap by the same member 409s and emits nothing new', async () => {
+    const first = await alice.agent
+      .post(`/api/chats/${groupId}/messages/${actionMsg.id}/actions`)
+      .send({ actionId: 'yes' });
+    expect(first.status).toBe(204);
+
+    const triggered: ActionTriggeredEvent[] = [];
+    const updated: MessageUpdatedEvent[] = [];
+    events.on('action:triggered', (e) => triggered.push(e));
+    events.on('message:updated', (e) => updated.push(e));
+
+    const second = await alice.agent
+      .post(`/api/chats/${groupId}/messages/${actionMsg.id}/actions`)
+      .send({ actionId: 'yes' });
+    expect(second.status).toBe(409);
+    expect(second.body.error).toBe('Action already taken');
+    expect(triggered).toHaveLength(0);
+    expect(updated).toHaveLength(0);
+  });
+
+  it('is one-shot across members AND actions: a different member tapping a different action 409s', async () => {
+    await alice.agent
+      .post(`/api/chats/${groupId}/messages/${actionMsg.id}/actions`)
+      .send({ actionId: 'yes' });
+
+    const res = await bob.agent
+      .post(`/api/chats/${groupId}/messages/${actionMsg.id}/actions`)
+      .send({ actionId: 'no' });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('Action already taken');
+
+    // The original tapper's record is untouched by the rejected second tap.
+    const page = await alice.agent.get(`/api/chats/${groupId}/messages`);
+    const persisted = (page.body.messages as MessageDTO[]).find((m) => m.id === actionMsg.id)!;
+    expect(persisted.actionTaken).toEqual({ actionId: 'yes', userId: alice.user.id });
+  });
+
+  it('409s on a lost claim race (column already set out-of-band) and emits nothing', async () => {
+    // Simulate a concurrent writer having already won the atomic claim.
+    db.update(messages)
+      .set({ actionTaken: JSON.stringify({ actionId: 'no', userId: bob.user.id, at: Date.now() }) })
+      .where(eq(messages.id, actionMsg.id))
+      .run();
+    const triggered: ActionTriggeredEvent[] = [];
+    const updated: MessageUpdatedEvent[] = [];
+    events.on('action:triggered', (e) => triggered.push(e));
+    events.on('message:updated', (e) => updated.push(e));
+
+    const res = await alice.agent
+      .post(`/api/chats/${groupId}/messages/${actionMsg.id}/actions`)
+      .send({ actionId: 'yes' });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('Action already taken');
+    expect(triggered).toHaveLength(0);
+    expect(updated).toHaveLength(0);
   });
 
   it('requires authentication', async () => {

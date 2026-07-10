@@ -135,6 +135,14 @@ export interface MessageDTO {
    * and always absent for tombstones.
    */
   actions?: MessageActionDTO[];
+  /**
+   * Set once a member taps one of the message's actions. Actions are
+   * one-shot: clients replace the buttons with a record line ("<label> —
+   * <member>"), and further taps are rejected with 409 'Action already
+   * taken' (simultaneous taps: first write wins). Delivered live via
+   * message:updated. Absent while the actions are still tappable.
+   */
+  actionTaken?: { actionId: string; userId: number } | null;
   /** ISO 8601 of the last edit, or null when never edited. Always null for tombstones. */
   editedAt: string | null;
   /**
@@ -213,6 +221,17 @@ export interface ScheduledMessageDTO {
   scheduledAt: string;
   /** ISO 8601 — when it was queued. */
   createdAt: string;
+}
+
+/**
+ * Bot variant of scheduling (Bearer-token auth): POST /api/bot/scheduled
+ * creates (chatId in the body since bot routes aren't chat-scoped), GET
+ * /api/bot/scheduled?chatId= lists the BOT's own pending rows, DELETE
+ * /api/bot/scheduled/:id cancels its own row. Same validation/cap as the
+ * human endpoints; "adjusting" a schedule = delete + re-create.
+ */
+export interface BotScheduleMessageRequest extends ScheduleMessageRequest {
+  chatId: number;
 }
 
 /** POST /api/chats/:id/scheduled — queue a send-later message. */

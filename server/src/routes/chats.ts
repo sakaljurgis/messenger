@@ -410,9 +410,11 @@ export function chatsRouter(db: Db, events: ChatEvents, storage: Storage): Route
 
   // POST /api/chats/:id/messages/:messageId/actions — tap a bot action button.
   // Any member may tap; the message must live in this chat, not be a tombstone,
-  // carry the given actionId, and have been sent by a still-alive bot with a
-  // webhook. On success the callback is dispatched to the bot fire-and-forget
-  // (via the shared bus / webhooks) and we 204 immediately.
+  // carry the given actionId, not already be resolved (actions are one-shot →
+  // 409 'Action already taken'), and have been sent by a still-alive bot with a
+  // webhook. On success the message's actionTaken is claimed, the callback is
+  // dispatched to the bot fire-and-forget and a message:updated live-swaps the
+  // buttons for a record line (via the shared bus), and we 204 immediately.
   router.post('/:id/messages/:messageId/actions', requireAuth, (req, res) => {
     const me = req.user!;
     const chatId = parseId(req.params.id);
@@ -450,6 +452,9 @@ export function chatsRouter(db: Db, events: ChatEvents, storage: Storage): Route
           return;
         case 'unknown-action':
           res.status(404).json({ error: 'Action not found' });
+          return;
+        case 'already-taken':
+          res.status(409).json({ error: 'Action already taken' });
           return;
         case 'bot-unavailable':
           res.status(400).json({ error: 'Bot unavailable' });

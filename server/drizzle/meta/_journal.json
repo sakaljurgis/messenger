@@ -85,6 +85,13 @@
       "when": 1783700000005,
       "tag": "0011_mighty_ultragirl",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1783700000006,
+      "tag": "0012_volatile_lorna_dane",
+      "breakpoints": true
     }
   ]
 }

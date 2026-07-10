@@ -1,0 +1,1 @@
+ALTER TABLE `messages` ADD `action_taken` text;
