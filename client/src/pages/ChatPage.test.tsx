@@ -537,6 +537,45 @@ describe('ChatPage', () => {
     confirmSpy.mockRestore();
   });
 
+  it('re-pins to the bottom when late-loading content grows the thread', async () => {
+    // Capture the ResizeObserver callback so the test can fire a "content grew"
+    // notification (jsdom has none; the component's effect no-ops without it).
+    let resizeCb: (() => void) | null = null;
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        constructor(cb: () => void) {
+          resizeCb = cb;
+        }
+        observe() {}
+        disconnect() {}
+      },
+    );
+    stubFetch({ messages: [msg(1, bob, 'Hi from Bob')] });
+    renderChatPage();
+    await screen.findByText('Hi from Bob');
+
+    // Simulate an image finishing its load after the initial bottom scroll:
+    // the content is now 1500px tall but the viewport sits 50px short of the
+    // end (initial scroll happened before the growth).
+    const scroller = screen.getByTestId('message-scroll');
+    Object.defineProperty(scroller, 'scrollHeight', { value: 1500, configurable: true });
+    Object.defineProperty(scroller, 'clientHeight', { value: 400, configurable: true });
+    let scrollTop = 1050;
+    Object.defineProperty(scroller, 'scrollTop', {
+      get: () => scrollTop,
+      set: (v: number) => {
+        scrollTop = v;
+      },
+      configurable: true,
+    });
+
+    act(() => {
+      resizeCb?.();
+    });
+    expect(scrollTop).toBe(1500);
+  });
+
   it('renders a link-preview card and attaches one live via message:updated', async () => {
     const preview = {
       url: 'https://example.com/article',

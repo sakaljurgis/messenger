@@ -992,6 +992,7 @@ export default function ChatPage() {
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null); // scroller's content, for growth re-pinning
   const stickToBottom = useRef(true); // is the viewport near the bottom?
   const didInitialScroll = useRef(false);
   // Identifies the current window (chat + focus target). When it changes the
@@ -1079,10 +1080,16 @@ export default function ChatPage() {
     [messages, members, meId],
   );
 
+  /** True when the viewport currently sits within NEAR_BOTTOM_PX of the thread's end. */
+  function measureNearBottom(): boolean {
+    const el = scrollRef.current;
+    return el ? el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX : true;
+  }
+
   function onScroll() {
     const el = scrollRef.current;
     if (!el) return;
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX;
+    const nearBottom = measureNearBottom();
     stickToBottom.current = nearBottom;
     // Only ever setState on an actual flip — scrolling fires constantly, and
     // this is the one piece of scroll-position state that must re-render.
@@ -1114,10 +1121,14 @@ export default function ChatPage() {
         didInitialScroll.current = true;
         if (unreadBoundaryId !== null) {
           document.getElementById('unread-divider')?.scrollIntoView({ block: 'center' });
+          // The divider may sit pages up — only keep following the bottom when
+          // the jump actually landed near it, else growth/new messages would
+          // yank the user away from the unread boundary they're reading.
+          stickToBottom.current = measureNearBottom();
         } else {
           bottomRef.current?.scrollIntoView({ block: 'end' });
+          stickToBottom.current = true;
         }
-        stickToBottom.current = true;
       }
     } else if (stickToBottom.current) {
       bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
@@ -1132,6 +1143,25 @@ export default function ChatPage() {
       bottomRef.current?.scrollIntoView({ block: 'end' });
     }
   }, [outbox.length, atLiveEdge]);
+
+  // Late-loading content (images without reserved height, video/audio players,
+  // link-preview cards) grows the thread AFTER the initial scroll ran, leaving
+  // the viewport stranded slightly above the true bottom. While pinned to the
+  // bottom, re-pin whenever the content's size changes; scrolled-up reading is
+  // untouched (stickToBottom is false then). jsdom has no ResizeObserver — the
+  // effect no-ops in tests that don't stub one.
+  useEffect(() => {
+    if (typeof ResizeObserver === 'undefined') return;
+    const content = contentRef.current;
+    if (!content) return;
+    const observer = new ResizeObserver(() => {
+      if (!didInitialScroll.current || !stickToBottom.current) return;
+      const el = scrollRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [chatId]);
 
   // Reset the jump-to-bottom pill's per-chat counters when the chat or focus
   // target changes. The unread-boundary freeze above self-heals via the
@@ -1333,6 +1363,9 @@ export default function ChatPage() {
           data-testid="message-scroll"
           className="h-full overflow-y-auto py-2"
         >
+          {/* Wrapper so the growth-repin ResizeObserver can watch the content's
+              height (observing the scroller itself only reports its fixed box). */}
+          <div ref={contentRef}>
           {hasMore && (
             <div className="flex justify-center py-2">
               <button
@@ -1416,6 +1449,7 @@ export default function ChatPage() {
 
           <TypingIndicator names={typingNames} isGroup={isGroup} />
           <div ref={bottomRef} />
+          </div>
         </div>
 
         {(!atBottom || !atLiveEdge) && (
