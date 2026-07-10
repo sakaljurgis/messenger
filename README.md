@@ -5,6 +5,8 @@ single container. Started as a proof of concept, now feature-complete for
 daily use. See [PLAN.md](PLAN.md) for the architecture history and
 [examples/README.md](examples/README.md) for bots.
 
+**Live demo:** https://messenger.sklk.lt/
+
 ## Features
 
 **Conversations**
