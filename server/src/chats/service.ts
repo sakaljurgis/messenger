@@ -92,6 +92,22 @@ export interface CreateMessageParams {
    * into `messages.actions`; the DTO re-parses it (see dto#parseActions).
    */
   actions?: MessageActionDTO[];
+  /**
+   * IANA timezone of the sender's device (browser-reported). Sanitized here —
+   * an unknown zone name is silently stored as null, mirroring how invalid
+   * mentions are dropped rather than failing the send.
+   */
+  timezone?: string;
+}
+
+/** True iff `zone` is an IANA name Intl can actually resolve. */
+function isValidTimezone(zone: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: zone });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -117,7 +133,7 @@ export type CreateMessageResult =
 export function createMessage(
   db: Db,
   events: ChatEvents,
-  { chatId, senderId, content, mentions, attachmentIds, replyToId, actions }: CreateMessageParams,
+  { chatId, senderId, content, mentions, attachmentIds, replyToId, actions, timezone }: CreateMessageParams,
 ): CreateMessageResult {
   const chat = getChatForMember(db, chatId, senderId);
   if (!chat) return { ok: false, reason: 'not-member' };
@@ -175,6 +191,7 @@ export function createMessage(
         content,
         replyToId: replyToId ?? null,
         actions: actionsJson,
+        senderTimezone: timezone && isValidTimezone(timezone) ? timezone : null,
       })
       .returning()
       .get();

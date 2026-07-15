@@ -133,6 +133,7 @@ describe('buildPushPayload', () => {
     attachments: [],
     reactions: [],
     replyTo: null,
+    senderTimezone: null,
     createdAt: '',
     editedAt: null,
     isDeleted: false,

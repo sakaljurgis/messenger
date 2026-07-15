@@ -111,6 +111,14 @@ export const messages = sqliteTable(
     replyToId: integer('reply_to_id').references((): AnySQLiteColumn => messages.id, {
       onDelete: 'set null',
     }),
+    /**
+     * IANA timezone of the sender's device at send time (from the browser),
+     * e.g. "Europe/Vilnius"; null when the client didn't provide one (older
+     * clients, bots, scheduled dispatches). Lets bots interpret human times
+     * ("at 9") in the sender's local zone. Sanitized server-side — an invalid
+     * name is stored as null, never trusted verbatim.
+     */
+    senderTimezone: text('sender_timezone'),
     createdAt: integer('created_at', { mode: 'timestamp' })
       .notNull()
       .$defaultFn(() => new Date()),

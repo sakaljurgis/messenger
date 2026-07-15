@@ -422,11 +422,27 @@ export function isNetworkError(err: unknown): boolean {
   return err instanceof TypeError && !(err instanceof ApiError);
 }
 
-/** POST a text/attachment message and resolve to the server's created DTO. */
+/** The device's IANA timezone, or undefined when Intl can't say (never throws). */
+function deviceTimezone(): string | undefined {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * POST a text/attachment message and resolve to the server's created DTO.
+ * Every send (live, outbox flush, attachment) funnels through here, so this is
+ * also the single spot that stamps the sender's device timezone onto the
+ * message — bots downstream use it to read "at 9" in the sender's local time.
+ */
 function postMessage(chatId: number, body: SendMessageRequest): Promise<MessageDTO> {
-  return apiPost<{ message: MessageDTO }>(`/api/chats/${chatId}/messages`, body).then(
-    (res) => res.message,
-  );
+  const timezone = deviceTimezone();
+  return apiPost<{ message: MessageDTO }>(`/api/chats/${chatId}/messages`, {
+    ...body,
+    ...(timezone ? { timezone } : {}),
+  }).then((res) => res.message);
 }
 
 // ---------------------------------------------------------------------------

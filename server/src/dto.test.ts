@@ -40,6 +40,7 @@ function makeMessage(overrides: Partial<MessageRow> = {}): MessageRow {
     linkPreview: null,
     actions: null,
     actionTaken: null,
+    senderTimezone: null,
     createdAt: new Date(),
     editedAt: null,
     deletedAt: null,

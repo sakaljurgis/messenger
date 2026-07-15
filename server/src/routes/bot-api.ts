@@ -49,6 +49,8 @@ const sendSchema = z
         message: 'Duplicate action id',
       })
       .optional(),
+    // Sender timezone hint, same semantics as the human route (invalid → null).
+    timezone: z.string().max(64).optional(),
   })
   .refine((d) => d.content.length > 0 || (d.attachmentIds?.length ?? 0) > 0, {
     message: 'Message content or attachments required',
@@ -111,6 +113,7 @@ export function botApiRouter(db: Db, events: ChatEvents): Router {
       attachmentIds: parsed.data.attachmentIds,
       replyToId: parsed.data.replyToId,
       actions: parsed.data.actions,
+      timezone: parsed.data.timezone,
     });
     if (!result.ok) {
       if (result.reason === 'invalid-attachments') {

@@ -266,6 +266,32 @@ describe('messages — access, validation, pagination', () => {
       .id as number;
   });
 
+  it('stores and echoes the sender timezone, and it survives a history refetch', async () => {
+    const res = await alice.agent
+      .post(`/api/chats/${dm}/messages`)
+      .send({ content: 'remind me at 9', timezone: 'Europe/Vilnius' });
+    expect(res.status).toBe(201);
+    expect((res.body.message as MessageDTO).senderTimezone).toBe('Europe/Vilnius');
+
+    const page = await bob.agent.get(`/api/chats/${dm}/messages`);
+    const stored = (page.body.messages as MessageDTO[]).find((m) => m.content === 'remind me at 9')!;
+    expect(stored.senderTimezone).toBe('Europe/Vilnius');
+  });
+
+  it('sanitizes an invalid timezone to null instead of failing the send', async () => {
+    const res = await alice.agent
+      .post(`/api/chats/${dm}/messages`)
+      .send({ content: 'hi', timezone: 'Mars/Olympus_Mons' });
+    expect(res.status).toBe(201);
+    expect((res.body.message as MessageDTO).senderTimezone).toBeNull();
+  });
+
+  it('leaves senderTimezone null when the client sends none', async () => {
+    const res = await send(alice, dm, 'no tz here');
+    expect(res.status).toBe(201);
+    expect((res.body.message as MessageDTO).senderTimezone).toBeNull();
+  });
+
   it('hides the chat from non-members (404 on GET and POST)', async () => {
     const get = await carol.agent.get(`/api/chats/${dm}/messages`);
     expect(get.status).toBe(404);

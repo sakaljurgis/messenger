@@ -123,6 +123,17 @@ export interface MessageDTO {
    * or null when it isn't a reply. Always null for tombstones.
    */
   replyTo: ReplyToDTO | null;
+  /**
+   * IANA timezone of the sender's device at send time (browser-reported via
+   * SendMessageRequest.timezone), e.g. "Europe/Vilnius". Null when the client
+   * didn't provide one (older clients, bots, scheduled dispatches) or the
+   * provided name wasn't a real zone (sanitized server-side, never trusted).
+   * Bots use it to interpret times like "at 9" in the sender's local zone.
+   * Always null for tombstones. Optional like the other later-added fields
+   * (linkPreview, actions) so pre-existing fixtures/clients stay valid; the
+   * server always includes it.
+   */
+  senderTimezone?: string | null;
   /** ISO 8601 */
   createdAt: string;
   /**
@@ -197,6 +208,13 @@ export interface SendMessageRequest {
    * same chat, else the send is rejected with 400 'Invalid reply target'.
    */
   replyToId?: number;
+  /**
+   * IANA timezone of the sending device (`Intl.DateTimeFormat().resolvedOptions()
+   * .timeZone`). Optional; stored on the message and echoed as
+   * MessageDTO.senderTimezone. An invalid name is silently stored as null
+   * (mirrors mention filtering — a bad hint never fails the send).
+   */
+  timezone?: string;
 }
 
 /** POST /api/chats/:chatId/messages/:messageId/actions — tap a bot action button (204). */

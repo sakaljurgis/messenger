@@ -369,7 +369,11 @@ describe('ChatPage', () => {
       ([input, init]) => input.toString().includes('/messages') && init?.method === 'POST',
     );
     expect(postCall).toBeDefined();
-    expect(JSON.parse(postCall?.[1]?.body as string)).toEqual({ content: 'A brand new message' });
+    // The device timezone rides along on every send (bots parse times in it).
+    expect(JSON.parse(postCall?.[1]?.body as string)).toEqual({
+      content: 'A brand new message',
+      timezone: expect.any(String),
+    });
   });
 
   it('highlights an @mention of me in an incoming message', async () => {
@@ -1219,7 +1223,11 @@ describe('ChatPage', () => {
       ([i, init]) => i.toString().includes('/messages') && init?.method === 'POST',
     );
     expect(postCall).toBeDefined();
-    expect(JSON.parse(postCall?.[1]?.body as string)).toEqual({ content: 'my reply', replyToId: 1 });
+    expect(JSON.parse(postCall?.[1]?.body as string)).toEqual({
+      content: 'my reply',
+      replyToId: 1,
+      timezone: expect.any(String),
+    });
 
     // Banner clears once the send resolves.
     await waitFor(() => expect(screen.queryByText('Replying to Bob')).not.toBeInTheDocument());

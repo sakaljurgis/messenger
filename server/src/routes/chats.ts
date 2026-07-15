@@ -38,6 +38,9 @@ const sendSchema = z
     attachmentIds: z.array(z.number().int().positive()).optional(),
     // Reply target; existence/same-chat/live checks happen in createMessage.
     replyToId: z.number().int().positive().optional(),
+    // Sender's device timezone (IANA). Length-capped here; real validation
+    // (does Intl know it?) happens in createMessage, invalid → stored null.
+    timezone: z.string().max(64).optional(),
   })
   .refine((d) => d.content.length > 0 || (d.attachmentIds?.length ?? 0) > 0, {
     message: 'Message content or attachments required',
@@ -269,6 +272,7 @@ export function chatsRouter(db: Db, events: ChatEvents, storage: Storage): Route
       mentions: parsed.data.mentions,
       attachmentIds: parsed.data.attachmentIds,
       replyToId: parsed.data.replyToId,
+      timezone: parsed.data.timezone,
     });
     if (!result.ok) {
       if (result.reason === 'invalid-attachments') {

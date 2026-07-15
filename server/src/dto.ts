@@ -180,6 +180,7 @@ export function toMessageDTO(
     attachments: isDeleted ? [] : attachments,
     reactions: isDeleted ? [] : reactions,
     replyTo: isDeleted ? null : replyTo,
+    senderTimezone: isDeleted ? null : message.senderTimezone,
     createdAt: message.createdAt.toISOString(),
     linkPreview: isDeleted ? null : parseLinkPreview(message.linkPreview),
     // Bot action buttons: absent for humans (null column) and always dropped on
