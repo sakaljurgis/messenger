@@ -1,0 +1,3 @@
+[submodule "reminder-bot"]
+	path = reminder-bot
+	url = git@github.com:sakaljurgis/messenger-reminder-bot.git
