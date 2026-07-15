@@ -1,7 +1,7 @@
 import { and, eq } from 'drizzle-orm';
 import { Router, type RequestHandler } from 'express';
 import { z } from 'zod';
-import { createMessage, getChatForMember } from '../chats/service.js';
+import { createMessage, getChatForMember, getMemberIds } from '../chats/service.js';
 import type { Db } from '../db/index.js';
 import { users } from '../db/schema.js';
 import type { ChatEvents } from '../events.js';
@@ -125,6 +125,27 @@ export function botApiRouter(db: Db, events: ChatEvents): Router {
       return;
     }
     res.status(201).json({ message: result.message });
+  });
+
+  // POST /api/bot/typing — a transient "the bot is typing" signal
+  // (BotTypingRequest). Membership-checked like every bot route (404, no
+  // existence leak), then relayed to the chat's other members over sockets via
+  // the bus — the exact fan-out a human's socket `typing` gets. Nothing is
+  // persisted; clients expire the indicator on their own, so a bot doing slow
+  // work (LLM parse) re-sends every few seconds.
+  router.post('/typing', (req, res) => {
+    const chatId = parseId((req.body as { chatId?: unknown })?.chatId);
+    if (chatId === null) {
+      res.status(400).json({ error: 'chatId is required' });
+      return;
+    }
+    const chat = getChatForMember(db, chatId, req.bot!.id);
+    if (!chat) {
+      res.status(404).json({ error: 'Chat not found' });
+      return;
+    }
+    events.emit('typing', { chat, memberIds: getMemberIds(db, chat.id), userId: req.bot!.id });
+    res.status(204).end();
   });
 
   // ── Scheduled ("send later") messages ──────────────────────────────────────

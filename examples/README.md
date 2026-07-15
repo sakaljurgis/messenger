@@ -127,6 +127,15 @@ immediately; your action callback (§3) is the bot's cue to follow up — usuall
 by sending another message. Tombstoned (deleted) messages drop their buttons and
 reject taps.
 
+### Typing — `POST /api/bot/typing`
+
+Same Bearer auth, body `{ "chatId": 1 }` → `204`. Relays a transient "typing"
+signal to the chat's **other** members' sockets — the exact event a human's
+keyboard produces, so clients render the same indicator. Nothing is
+persisted, and clients expire the indicator after a few seconds: a bot doing
+slow work (say, an LLM call) should re-send every ~3 s until done. Non-member
+→ `404`, missing `chatId` → `400`.
+
 ## 5. Scheduling — send later
 
 Three Bearer-authenticated endpoints mirror the human send-later routes. Because

@@ -234,6 +234,16 @@ export interface BotScheduleMessageRequest extends ScheduleMessageRequest {
   chatId: number;
 }
 
+/**
+ * POST /api/bot/typing — a bot signals it is "typing" in a chat (e.g. while an
+ * LLM parse runs). Transient: relayed once to the other members' sockets
+ * exactly like a human's socket `typing` signal (same client expiry); nothing
+ * is persisted. Re-send every few seconds to keep the indicator alive.
+ */
+export interface BotTypingRequest {
+  chatId: number;
+}
+
 /** POST /api/chats/:id/scheduled — queue a send-later message. */
 export interface ScheduleMessageRequest {
   /** Trimmed 1–4000 chars (same rule as a live send; can't be empty). */

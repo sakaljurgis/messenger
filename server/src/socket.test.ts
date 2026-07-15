@@ -314,6 +314,34 @@ describe('Socket.IO real-time', () => {
     expect(bobGotTyping).toBe(false);
   });
 
+  it('relays a bot typing signal (POST /api/bot/typing) to the human member', async () => {
+    const alice = await register(ctx.app, 'alice@example.com', 'Alice');
+    const created = await request(ctx.app)
+      .post('/api/bots')
+      .set('Cookie', alice.cookie)
+      .send({ name: 'Reminder' });
+    const bot = created.body.bot as UserDTO;
+    const apiToken = created.body.apiToken as string;
+
+    const dm = await request(ctx.app)
+      .post('/api/chats')
+      .set('Cookie', alice.cookie)
+      .send({ userId: bot.id });
+    const chatId = dm.body.chat.id as number;
+
+    const aliceSocket = connect(alice.cookie);
+    await waitConnect(aliceSocket);
+
+    const aliceReceived = waitFor<{ chatId: number; userId: number }>(aliceSocket, 'typing');
+    const res = await request(ctx.app)
+      .post('/api/bot/typing')
+      .set('Authorization', `Bearer ${apiToken}`)
+      .send({ chatId });
+
+    expect(res.status).toBe(204);
+    expect(await aliceReceived).toEqual({ chatId, userId: bot.id });
+  });
+
   it('sends a presence:state snapshot that lists an already-connected user', async () => {
     const alice = await register(ctx.app, 'alice@example.com', 'Alice');
     const bob = await register(ctx.app, 'bob@example.com', 'Bob');

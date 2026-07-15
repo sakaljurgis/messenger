@@ -218,5 +218,15 @@ export function initSocket(
     }
   });
 
+  // A BOT is "typing" (POST /api/bot/typing → bus). Relayed to every OTHER
+  // member exactly like the human socket `typing` handler above — same event
+  // name and payload, so clients can't tell bots and humans apart here.
+  events.on('typing', ({ chat, memberIds, userId }) => {
+    for (const id of memberIds) {
+      if (id === userId) continue;
+      io.to(`user:${id}`).emit('typing', { chatId: chat.id, userId });
+    }
+  });
+
   return { io, isUserConnected, clearPresenceTimers };
 }

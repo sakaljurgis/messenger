@@ -3,7 +3,7 @@ import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../app.js';
 import { createDb, type Db } from '../db/index.js';
-import { createChatEvents, type ChatEvents, type MessageNewEvent } from '../events.js';
+import { createChatEvents, type ChatEvents, type MessageNewEvent, type TypingEvent } from '../events.js';
 import { startScheduledDispatcher } from '../scheduled.js';
 
 type App = ReturnType<typeof createApp>;
@@ -476,5 +476,69 @@ describe('bot scheduled messages — end-to-end dispatch', () => {
     // And it lands in real history for the human member.
     const page = await alice.agent.get(`/api/chats/${dmId}/messages`);
     expect((page.body.messages as MessageDTO[]).map((m) => m.content)).toContain('later, from a bot');
+  });
+});
+
+describe('POST /api/bot/typing', () => {
+  let db: Db;
+  let events: ChatEvents;
+  let app: App;
+  let alice: Actor;
+  let bot: UserDTO;
+  let apiToken: string;
+  let dmId: number;
+
+  function botTyping(token: string, body: object) {
+    return request(app)
+      .post('/api/bot/typing')
+      .set('Authorization', `Bearer ${token}`)
+      .send(body);
+  }
+
+  beforeEach(async () => {
+    db = createDb(':memory:');
+    events = createChatEvents();
+    app = createApp(db, events);
+    alice = await register(app, 'alice@example.com', 'Alice');
+    ({ bot, apiToken } = await createBot(alice, 'Reminder'));
+    dmId = (await alice.agent.post('/api/chats').send({ userId: bot.id })).body.chat.id as number;
+  });
+
+  it('emits a typing bus event with the full member list and returns 204', async () => {
+    const seen: TypingEvent[] = [];
+    events.on('typing', (e) => seen.push(e));
+
+    const res = await botTyping(apiToken, { chatId: dmId });
+
+    expect(res.status).toBe(204);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.userId).toBe(bot.id);
+    expect(seen[0]!.chat.id).toBe(dmId);
+    expect(new Set(seen[0]!.memberIds)).toEqual(new Set([alice.user.id, bot.id]));
+  });
+
+  it('requires chatId (400)', async () => {
+    const res = await botTyping(apiToken, {});
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('chatId is required');
+  });
+
+  it('returns 404 (no leak) for a chat the bot is not a member of', async () => {
+    const bob = await register(app, 'bob@example.com', 'Bob');
+    const otherDm = (await alice.agent.post('/api/chats').send({ userId: bob.user.id })).body.chat
+      .id as number;
+
+    const seen: TypingEvent[] = [];
+    events.on('typing', (e) => seen.push(e));
+
+    const res = await botTyping(apiToken, { chatId: otherDm });
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Chat not found');
+    expect(seen).toHaveLength(0);
+  });
+
+  it('rejects a bad token with 401', async () => {
+    const res = await botTyping('garbage', { chatId: dmId });
+    expect(res.status).toBe(401);
   });
 });

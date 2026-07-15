@@ -77,6 +77,18 @@ export interface ActionTriggeredEvent {
   chat: ChatRow;
 }
 
+/**
+ * A member is typing. In practice only BOTS emit this on the bus (via
+ * POST /api/bot/typing — humans send `typing` over their own socket, which
+ * relays directly without touching the bus). Socket relay is the only
+ * subscriber; the signal is transient and never persisted.
+ */
+export interface TypingEvent {
+  chat: ChatRow;
+  memberIds: number[];
+  userId: number;
+}
+
 interface EventMap {
   'message:new': [MessageNewEvent];
   'message:updated': [MessageUpdatedEvent];
@@ -84,6 +96,7 @@ interface EventMap {
   'chat:updated': [ChatUpdatedEvent];
   'read:updated': [ReadUpdatedEvent];
   'action:triggered': [ActionTriggeredEvent];
+  'typing': [TypingEvent];
 }
 
 /** Typed facade over a plain node EventEmitter — only the known events exist. */
