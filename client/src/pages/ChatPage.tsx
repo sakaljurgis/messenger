@@ -183,7 +183,11 @@ function MessageActions({
   );
 
   return (
-    <div ref={wrapRef} className="group relative flex items-center gap-1">
+    // max-w-full is load-bearing: this row sits in an items-start/items-end
+    // column, so without it the row sizes to its content's min-content width
+    // (a long unbroken word, a nowrap reply preview) and overflows the 75%
+    // bubble column — the source of the thread's horizontal scrolling.
+    <div ref={wrapRef} className="group relative flex max-w-full items-center gap-1">
       {isMine && dotsButton}
       <div
         // Suppress the OS long-press UI (text-selection handles / copy callout)
@@ -558,18 +562,22 @@ function AttachmentVideo({ video, isMine }: { video: AttachmentDTO; isMine: bool
 /**
  * Non-image attachment: a download card styled like the message bubble. A PDF
  * is the one exception — the server serves it inline (Content-Disposition:
- * inline), so instead of forcing a download it opens in a new tab in the
- * browser's native PDF viewer: no `?download=1`, no `download` attribute,
- * `target="_blank"` (so the thread stays open behind it). The subtitle swaps
- * to "PDF · <size>" as a small visual hint that it opens rather than saves.
- * Every other file type keeps the plain download behavior unchanged.
+ * inline), so instead of forcing a download it opens in the browser's native
+ * PDF viewer: no `?download=1`, no `download` attribute. Deliberately the SAME
+ * browsing context (no `target="_blank"`): in the installed PWA a `_blank`
+ * same-origin link opens a fresh context with no history, leaving the phone
+ * user stranded on the PDF with no way back but killing the app. A same-tab
+ * navigation keeps the history entry, so the system back gesture / browser
+ * back returns to the chat. The subtitle swaps to "PDF · <size>" as a small
+ * visual hint that it opens rather than saves. Every other file type keeps
+ * the plain download behavior unchanged.
  */
 function AttachmentFile({ file, isMine }: { file: AttachmentDTO; isMine: boolean }) {
   const bubble = isMine ? 'bg-[#0084ff] text-white' : 'bg-gray-200 text-gray-900 dark:bg-gray-700 dark:text-gray-100';
   const sub = isMine ? 'text-white/70' : 'text-gray-500 dark:text-gray-400';
   const isPdf = file.mimeType === 'application/pdf';
   const linkProps = isPdf
-    ? { href: attachmentUrl(file.id), target: '_blank', rel: 'noopener noreferrer' }
+    ? { href: attachmentUrl(file.id) }
     : { href: attachmentUrl(file.id, { download: true }), download: file.originalName };
   return (
     <a {...linkProps} className={`flex max-w-[16rem] items-center gap-3 rounded-2xl px-3 py-2 ${bubble}`}>
@@ -673,7 +681,11 @@ function MessageStack({
       ))}
       {hasText && (
         // No whitespace-pre-wrap: the markdown renderer owns line breaks (remark-breaks).
-        <div className={`break-words rounded-2xl px-3 py-2 ${bubble}`}>
+        // overflow-wrap:anywhere (not break-words) because only `anywhere`
+        // shrinks the min-content width — long URLs/words must wrap instead of
+        // widening the bubble past its column; max-w-full caps it in the
+        // items-start/items-end column, which never stretches children.
+        <div className={`max-w-full rounded-2xl px-3 py-2 [overflow-wrap:anywhere] ${bubble}`}>
           <MessageContent message={message} members={members} meId={meId} isMine={isMine} />
         </div>
       )}
@@ -837,7 +849,7 @@ function MessageRow({
   if (isMine) {
     return (
       <div className={`flex justify-end px-3 ${spacing}`}>
-        <div className="flex max-w-[75%] flex-col items-end">
+        <div className="flex min-w-0 max-w-[75%] flex-col items-end">
           {message.isDeleted ? (
             <TombstoneBubble />
           ) : (
@@ -875,7 +887,7 @@ function MessageRow({
 
   return (
     <div className={`flex justify-start px-3 ${spacing}`}>
-      <div className="flex max-w-[75%] items-end gap-2">
+      <div className="flex min-w-0 max-w-[75%] items-end gap-2">
         {isGroup && (
           <div className="w-8 flex-shrink-0">
             {showAvatar && (
@@ -899,7 +911,7 @@ function MessageRow({
         <div className="flex min-w-0 flex-col items-start">
           {(showSender || nameRevealed) && (
             <span
-              className="mb-0.5 ml-1 text-xs font-medium"
+              className="mb-0.5 ml-1 max-w-full truncate text-xs font-medium"
               style={{ color: accentColor(message.sender) }}
             >
               {message.sender.displayName}
@@ -1006,8 +1018,10 @@ function OutboxBubble({
 }) {
   const failed = item.status === 'failed';
   const bubble = (
+    // Same wrapping rules as a real bubble (see MessageStack): anywhere-wrap +
+    // max-w-full so a long unbroken word can't widen the thread.
     <div
-      className={`break-words rounded-2xl bg-[#0084ff] px-3 py-2 text-white ${
+      className={`max-w-full rounded-2xl bg-[#0084ff] px-3 py-2 text-white [overflow-wrap:anywhere] ${
         failed ? '' : 'opacity-60'
       }`}
     >
@@ -1017,9 +1031,9 @@ function OutboxBubble({
 
   return (
     <div className="mt-0.5 flex justify-end px-3">
-      <div className="flex max-w-[75%] flex-col items-end">
+      <div className="flex min-w-0 max-w-[75%] flex-col items-end">
         {failed ? (
-          <button type="button" onClick={onRetry} aria-label="Retry sending message" className="block text-left">
+          <button type="button" onClick={onRetry} aria-label="Retry sending message" className="block max-w-full text-left">
             {bubble}
           </button>
         ) : (
@@ -1196,6 +1210,13 @@ export default function ChatPage() {
   const receiptsByMessageId = useMemo(
     () => readPositions(messages, members, meId),
     [messages, members, meId],
+  );
+
+  // Every photo in the loaded window, in thread order — the lightbox gallery.
+  // Deleted messages carry no attachments, so tombstones drop out naturally.
+  const galleryImages = useMemo(
+    () => messages.flatMap((m) => m.attachments.filter((a) => a.kind === 'image')),
+    [messages],
   );
 
   /** True when the viewport currently sits within NEAR_BOTTOM_PX of the thread's end. */
@@ -1557,7 +1578,10 @@ export default function ChatPage() {
           ref={scrollRef}
           onScroll={onScroll}
           data-testid="message-scroll"
-          className="h-full overflow-y-auto py-2"
+          // overflow-x-hidden: an overflow-y scroller's x-axis computes to
+          // auto, so any stray too-wide bubble would make the whole thread
+          // horizontally scrollable — clip it instead.
+          className="h-full overflow-x-hidden overflow-y-auto py-2"
         >
           {/* Wrapper so the growth-repin ResizeObserver can watch the content's
               height (observing the scroller itself only reports its fixed box). */}
@@ -1697,7 +1721,14 @@ export default function ChatPage() {
         onCancelReply={() => setReplyingTo(null)}
       />
 
-      {lightbox && <Lightbox attachment={lightbox} onClose={() => setLightbox(null)} />}
+      {lightbox && (
+        <Lightbox
+          attachment={lightbox}
+          images={galleryImages}
+          onNavigate={setLightbox}
+          onClose={() => setLightbox(null)}
+        />
+      )}
       {showInfo && isGroup && chat && (
         <GroupInfo chat={chat} meId={meId} onClose={() => setShowInfo(false)} />
       )}

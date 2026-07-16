@@ -329,9 +329,10 @@ function PendingTile({
   );
 }
 
-/** Sticky bottom composer: attachment button + HD toggle, rounded input, and a
- *  circular blue send button, with an @mention autocomplete panel that floats
- *  above the input while typing and a preview strip for pending attachments. */
+/** Sticky bottom composer, two rows: a full-width rounded input on top, and a
+ *  controls row below it (attach/mic/HD/schedule left, circular blue send
+ *  right), with an @mention autocomplete panel that floats above the input
+ *  while typing and a preview strip for pending attachments. */
 export default function Composer({
   onSend,
   disabled = false,
@@ -1207,54 +1208,10 @@ export default function Composer({
           </button>
         </div>
       ) : (
-      <div className="flex items-end gap-2">
-        {/* Attachments aren't editable, so the upload controls are hidden in edit mode. */}
-        {!isEditing && (
-          <>
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              className="hidden"
-              onChange={handleFilePick}
-              data-testid="file-input"
-            />
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={disabled}
-              aria-label="Attach files"
-              className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full text-gray-500 transition-colors hover:bg-gray-100 disabled:opacity-40 dark:text-gray-400 dark:hover:bg-gray-700"
-            >
-              <PaperclipIcon />
-            </button>
-            {recordingSupported && (
-              <button
-                type="button"
-                onClick={() => void startRecording()}
-                disabled={disabled}
-                aria-label="Record voice message"
-                className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full text-gray-500 transition-colors hover:bg-gray-100 disabled:opacity-40 dark:text-gray-400 dark:hover:bg-gray-700"
-              >
-                <MicIcon />
-              </button>
-            )}
-            <button
-              type="button"
-              onClick={() => setHd((v) => !v)}
-              aria-pressed={hd}
-              title="Upload original quality"
-              // Same h-10 footprint as every other control in this items-end
-              // row — a shorter pill sits visibly sunken against the bottom line.
-              className={`flex h-10 min-w-10 flex-shrink-0 items-center justify-center rounded-full px-2.5 text-xs font-bold transition-colors ${
-                hd ? 'bg-[#0084ff] text-white' : 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-400'
-              }`}
-            >
-              HD
-            </button>
-          </>
-        )}
-
+      <>
+        {/* Two-row layout: the textarea gets the full composer width (long
+            messages stay readable), with every control on its own row below —
+            utilities on the left, send on the right. */}
         <label htmlFor="composer-input" className="sr-only">
           Message
         </label>
@@ -1279,34 +1236,82 @@ export default function Composer({
           }}
           disabled={disabled}
           style={{ maxHeight: MAX_TEXTAREA_HEIGHT }}
-          className="min-w-0 flex-1 resize-none overflow-y-auto rounded-2xl bg-gray-100 px-4 py-2.5 text-gray-900 focus:outline-none disabled:opacity-60 dark:bg-gray-700 dark:text-gray-100 dark:placeholder:text-gray-400"
+          className="w-full resize-none overflow-y-auto rounded-2xl bg-gray-100 px-4 py-2.5 text-gray-900 focus:outline-none disabled:opacity-60 dark:bg-gray-700 dark:text-gray-100 dark:placeholder:text-gray-400"
         />
-        {showSchedule && (
+        <div className="flex items-center gap-1">
+          {/* Attachments aren't editable, so the upload controls are hidden in edit mode. */}
+          {!isEditing && (
+            <>
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                className="hidden"
+                onChange={handleFilePick}
+                data-testid="file-input"
+              />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={disabled}
+                aria-label="Attach files"
+                className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full text-gray-500 transition-colors hover:bg-gray-100 disabled:opacity-40 dark:text-gray-400 dark:hover:bg-gray-700"
+              >
+                <PaperclipIcon />
+              </button>
+              {recordingSupported && (
+                <button
+                  type="button"
+                  onClick={() => void startRecording()}
+                  disabled={disabled}
+                  aria-label="Record voice message"
+                  className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full text-gray-500 transition-colors hover:bg-gray-100 disabled:opacity-40 dark:text-gray-400 dark:hover:bg-gray-700"
+                >
+                  <MicIcon />
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setHd((v) => !v)}
+                aria-pressed={hd}
+                title="Upload original quality"
+                // Same h-10 footprint as every other control in this row — a
+                // shorter pill would sit visibly off the shared centerline.
+                className={`flex h-10 min-w-10 flex-shrink-0 items-center justify-center rounded-full px-2.5 text-xs font-bold transition-colors ${
+                  hd ? 'bg-[#0084ff] text-white' : 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-400'
+                }`}
+              >
+                HD
+              </button>
+            </>
+          )}
+          {showSchedule && (
+            <button
+              type="button"
+              onClick={() => setScheduleOpen((v) => !v)}
+              disabled={scheduleDisabled}
+              aria-label="Schedule message"
+              aria-expanded={scheduleOpen}
+              title={
+                pending.length > 0
+                  ? "Attachments can't be scheduled — send them with the message instead"
+                  : 'Schedule for later'
+              }
+              className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full text-gray-500 transition-colors hover:bg-gray-100 disabled:opacity-40 dark:text-gray-400 dark:hover:bg-gray-700"
+            >
+              <ClockIcon />
+            </button>
+          )}
           <button
-            type="button"
-            onClick={() => setScheduleOpen((v) => !v)}
-            disabled={scheduleDisabled}
-            aria-label="Schedule message"
-            aria-expanded={scheduleOpen}
-            title={
-              pending.length > 0
-                ? "Attachments can't be scheduled — send them with the message instead"
-                : 'Schedule for later'
-            }
-            className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full text-gray-500 transition-colors hover:bg-gray-100 disabled:opacity-40 dark:text-gray-400 dark:hover:bg-gray-700"
+            type="submit"
+            disabled={!canSend}
+            aria-label={isEditing ? 'Save edit' : 'Send'}
+            className="ml-auto flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-[#0084ff] text-white transition-opacity disabled:opacity-40"
           >
-            <ClockIcon />
+            {isEditing ? <CheckIcon /> : <SendIcon />}
           </button>
-        )}
-        <button
-          type="submit"
-          disabled={!canSend}
-          aria-label={isEditing ? 'Save edit' : 'Send'}
-          className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-[#0084ff] text-white transition-opacity disabled:opacity-40"
-        >
-          {isEditing ? <CheckIcon /> : <SendIcon />}
-        </button>
-      </div>
+        </div>
+      </>
       )}
     </form>
   );

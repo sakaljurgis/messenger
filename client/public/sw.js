@@ -16,7 +16,7 @@
  * old shell on activate and pick up the new worker.
  */
 
-const CACHE = 'messenger-shell-v2';
+const CACHE = 'messenger-shell-v3';
 
 // Where the share-target payload is stashed for the /share page to read. Kept in
 // sync with the key layout in src/lib/share.ts.
@@ -102,13 +102,22 @@ self.addEventListener('fetch', (event) => {
   // Only the app-shell navigation is our concern; let all other requests be.
   if (request.mode !== 'navigate') return;
 
+  // API navigations (e.g. a PDF attachment opened in the app window) are NOT
+  // the shell: never intercept them — caching one as '/' would poison the
+  // offline shell with a PDF/JSON body.
+  if (url.pathname.startsWith('/api/')) return;
+
   event.respondWith(
     (async () => {
       try {
         const response = await fetch(request);
-        // Refresh the cached shell on every successful navigation.
-        const cache = await caches.open(CACHE);
-        cache.put('/', response.clone());
+        // Refresh the cached shell on every successful navigation. Only an OK
+        // response may become the shell — a 404/500 page must not shadow the
+        // last good one.
+        if (response.ok) {
+          const cache = await caches.open(CACHE);
+          cache.put('/', response.clone());
+        }
         return response;
       } catch {
         // Offline: serve the last good shell if we have one.

@@ -436,6 +436,79 @@ describe('ChatPage', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
+  it('lightbox steps through every loaded photo in the chat (buttons + arrow keys)', async () => {
+    // Three photos spread across two messages — the gallery spans the whole
+    // loaded window in thread order, not just the clicked message.
+    const older: MessageDTO = { ...msg(1, bob, ''), attachments: [imageAttachment(41, 'a.jpg')] };
+    const newer: MessageDTO = {
+      ...msg(2, bob, ''),
+      attachments: [imageAttachment(42, 'b.jpg'), imageAttachment(43, 'c.jpg')],
+    };
+    stubFetch({ messages: [older, newer] });
+    renderChatPage();
+
+    // Open the middle photo.
+    await userEvent.click(await screen.findByAltText('b.jpg'));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByAltText('b.jpg')).toBeInTheDocument();
+    expect(within(dialog).getByText('2 / 3')).toBeInTheDocument();
+
+    // Next button → third photo; the next arrow disappears at the gallery end.
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Next photo' }));
+    expect(within(dialog).getByAltText('c.jpg')).toBeInTheDocument();
+    expect(within(dialog).getByText('3 / 3')).toBeInTheDocument();
+    expect(within(dialog).queryByRole('button', { name: 'Next photo' })).not.toBeInTheDocument();
+
+    // Arrow keys walk back to the first photo, crossing the message boundary.
+    await userEvent.keyboard('{ArrowLeft}{ArrowLeft}');
+    expect(within(dialog).getByAltText('a.jpg')).toBeInTheDocument();
+    expect(within(dialog).getByText('1 / 3')).toBeInTheDocument();
+    expect(within(dialog).queryByRole('button', { name: 'Previous photo' })).not.toBeInTheDocument();
+
+    // ArrowLeft at the start is a no-op, not a wrap-around.
+    await userEvent.keyboard('{ArrowLeft}');
+    expect(within(dialog).getByAltText('a.jpg')).toBeInTheDocument();
+  });
+
+  it('lightbox swipes to the neighboring photo on touch (mobile)', async () => {
+    const imgMsg: MessageDTO = {
+      ...msg(1, bob, ''),
+      attachments: [imageAttachment(42, 'b.jpg'), imageAttachment(43, 'c.jpg')],
+    };
+    stubFetch({ messages: [imgMsg] });
+    renderChatPage();
+
+    await userEvent.click(await screen.findByAltText('b.jpg'));
+    const dialog = await screen.findByRole('dialog');
+
+    // Swipe left (finger travels right→left) → next photo.
+    fireEvent.touchStart(dialog, { touches: [{ clientX: 300, clientY: 100 }] });
+    fireEvent.touchEnd(dialog, { changedTouches: [{ clientX: 180, clientY: 110 }] });
+    expect(within(dialog).getByAltText('c.jpg')).toBeInTheDocument();
+
+    // Swipe right → back to the previous photo.
+    fireEvent.touchStart(dialog, { touches: [{ clientX: 100, clientY: 100 }] });
+    fireEvent.touchEnd(dialog, { changedTouches: [{ clientX: 260, clientY: 95 }] });
+    expect(within(dialog).getByAltText('b.jpg')).toBeInTheDocument();
+
+    // A mostly-vertical drag (scroll-ish gesture) does NOT navigate.
+    fireEvent.touchStart(dialog, { touches: [{ clientX: 200, clientY: 100 }] });
+    fireEvent.touchEnd(dialog, { changedTouches: [{ clientX: 140, clientY: 400 }] });
+    expect(within(dialog).getByAltText('b.jpg')).toBeInTheDocument();
+  });
+
+  it('lightbox for a single photo shows no navigation affordances', async () => {
+    const imgMsg: MessageDTO = { ...msg(1, bob, ''), attachments: [imageAttachment(42)] };
+    stubFetch({ messages: [imgMsg] });
+    renderChatPage();
+
+    await userEvent.click(await screen.findByAltText('photo.jpg'));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).queryByRole('button', { name: 'Previous photo' })).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole('button', { name: 'Next photo' })).not.toBeInTheDocument();
+    expect(within(dialog).queryByText('1 / 1')).not.toBeInTheDocument();
+  });
+
   it('renders a video attachment as an inline <video> with controls', async () => {
     const vidMsg: MessageDTO = { ...msg(1, bob, ''), attachments: [videoAttachment(77)] };
     stubFetch({ messages: [vidMsg] });
@@ -527,18 +600,19 @@ describe('ChatPage', () => {
     expect(link).not.toHaveAttribute('target');
   });
 
-  it('opens a PDF attachment in a new tab via the native viewer instead of downloading', async () => {
+  it('opens a PDF attachment inline in the SAME tab (history back returns to the chat)', async () => {
     const fileMsg: MessageDTO = { ...msg(1, bob, ''), attachments: [fileAttachment(9)] };
     stubFetch({ messages: [fileMsg] });
     renderChatPage();
 
     const name = await screen.findByText('report.pdf');
     const link = name.closest('a') as HTMLAnchorElement;
-    // No ?download=1, no `download` attribute — opens inline in a new tab.
+    // No ?download=1, no `download` attribute — opens inline in the viewer.
     expect(link.getAttribute('href')).toBe('/api/attachments/9');
     expect(link).not.toHaveAttribute('download');
-    expect(link).toHaveAttribute('target', '_blank');
-    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+    // Same browsing context: `target="_blank"` in the installed PWA opens a
+    // history-less context the phone user can't back out of.
+    expect(link).not.toHaveAttribute('target');
     // Visual hint that this one opens rather than saves.
     expect(screen.getByText(`PDF · ${formatBytes(3_355_443)}`)).toBeInTheDocument();
   });
