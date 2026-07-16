@@ -9,8 +9,11 @@ replies with jump-to-original, FTS5 message search with windowed history
 (?around=/?after=), Socket.IO real-time, web push + per-chat mute, webhook
 bots (management UI at /bots; deletes are soft — users.deletedAt — so message
 history keeps its sender), attachments (client compression + HD toggle, sharp
-thumbnails, lightbox, inline video/audio with Range streaming, voice
-messages), link previews (SSRF-guarded server fetcher in
+thumbnails, sliding-gallery lightbox, inline video/audio with Range streaming,
+voice messages; PDFs open in an in-app pdf.js viewer — pdfjs-dist is
+lazy-loaded, and PDF cards must NEVER be links: any navigation strands the
+installed PWA on a view with no back affordance), link previews
+(SSRF-guarded server fetcher in
 server/src/link-previews.ts, a 4th event-bus subscriber), message edit/delete
 (tombstones), offline outbox + per-chat drafts, read receipts, typing
 indicators, presence dots, dark/light/system theme, orphaned-attachment

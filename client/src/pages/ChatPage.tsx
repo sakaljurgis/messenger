@@ -36,6 +36,7 @@ import Avatar from '../components/Avatar';
 import Composer from '../components/Composer';
 import GroupInfo from '../components/GroupInfo';
 import Lightbox from '../components/Lightbox';
+import PdfViewer from '../components/PdfViewer';
 import VoiceNotePlayer from '../components/VoiceNotePlayer';
 
 const NEAR_BOTTOM_PX = 100;
@@ -561,33 +562,56 @@ function AttachmentVideo({ video, isMine }: { video: AttachmentDTO; isMine: bool
 
 /**
  * Non-image attachment: a download card styled like the message bubble. A PDF
- * is the one exception — the server serves it inline (Content-Disposition:
- * inline), so instead of forcing a download it opens in the browser's native
- * PDF viewer: no `?download=1`, no `download` attribute. Deliberately the SAME
- * browsing context (no `target="_blank"`): in the installed PWA a `_blank`
- * same-origin link opens a fresh context with no history, leaving the phone
- * user stranded on the PDF with no way back but killing the app. A same-tab
- * navigation keeps the history entry, so the system back gesture / browser
- * back returns to the chat. The subtitle swaps to "PDF · <size>" as a small
- * visual hint that it opens rather than saves. Every other file type keeps
- * the plain download behavior unchanged.
+ * is the one exception — instead of downloading, its card opens the in-app
+ * pdf.js viewer (PdfViewer) via `onOpenPdf`. It must NOT be a navigation:
+ * both same-tab and `target="_blank"` navigations strand the installed-PWA
+ * phone user on a PDF view with no back affordance (a `_blank` same-origin
+ * link even gets a fresh, history-less context), and the origin's manifest
+ * scope means it can never get the external-URL custom-tab treatment. The
+ * subtitle swaps to "PDF · <size>" as a small visual hint that it opens
+ * rather than saves. Every other file type keeps the plain download behavior
+ * unchanged (as does a PDF with no `onOpenPdf` wired, e.g. the video-fallback
+ * call site — a plain download link, never a trap).
  */
-function AttachmentFile({ file, isMine }: { file: AttachmentDTO; isMine: boolean }) {
+function AttachmentFile({
+  file,
+  isMine,
+  onOpenPdf,
+}: {
+  file: AttachmentDTO;
+  isMine: boolean;
+  onOpenPdf?: (a: AttachmentDTO) => void;
+}) {
   const bubble = isMine ? 'bg-[#0084ff] text-white' : 'bg-gray-200 text-gray-900 dark:bg-gray-700 dark:text-gray-100';
   const sub = isMine ? 'text-white/70' : 'text-gray-500 dark:text-gray-400';
   const isPdf = file.mimeType === 'application/pdf';
-  const linkProps = isPdf
-    ? { href: attachmentUrl(file.id) }
-    : { href: attachmentUrl(file.id, { download: true }), download: file.originalName };
-  return (
-    <a {...linkProps} className={`flex max-w-[16rem] items-center gap-3 rounded-2xl px-3 py-2 ${bubble}`}>
+  const inner = (
+    <>
       <FileIcon />
-      <span className="flex min-w-0 flex-col">
+      <span className="flex min-w-0 flex-col text-left">
         <span className="truncate font-medium">{file.originalName}</span>
         <span className={`text-xs ${sub}`}>
           {isPdf ? `PDF · ${formatBytes(file.sizeBytes)}` : formatBytes(file.sizeBytes)}
         </span>
       </span>
+    </>
+  );
+  const cardClass = `flex max-w-[16rem] items-center gap-3 rounded-2xl px-3 py-2 ${bubble}`;
+
+  if (isPdf && onOpenPdf) {
+    return (
+      <button type="button" onClick={() => onOpenPdf(file)} className={cardClass}>
+        {inner}
+      </button>
+    );
+  }
+  return (
+    <a
+      href={attachmentUrl(file.id, { download: true })}
+      download={file.originalName}
+      className={cardClass}
+    >
+      {inner}
     </a>
   );
 }
@@ -641,6 +665,7 @@ function MessageStack({
   meId,
   isMine,
   onOpenImage,
+  onOpenPdf,
   onJumpToMessage,
   onTriggerAction,
 }: {
@@ -649,6 +674,7 @@ function MessageStack({
   meId: number;
   isMine: boolean;
   onOpenImage: (a: AttachmentDTO) => void;
+  onOpenPdf: (a: AttachmentDTO) => void;
   onJumpToMessage: (messageId: number) => void;
   onTriggerAction: (actionId: string) => Promise<void>;
 }) {
@@ -677,7 +703,7 @@ function MessageStack({
         <VoiceNotePlayer key={a.id} audio={a} />
       ))}
       {files.map((f) => (
-        <AttachmentFile key={f.id} file={f} isMine={isMine} />
+        <AttachmentFile key={f.id} file={f} isMine={isMine} onOpenPdf={onOpenPdf} />
       ))}
       {hasText && (
         // No whitespace-pre-wrap: the markdown renderer owns line breaks (remark-breaks).
@@ -817,6 +843,7 @@ function MessageRow({
   meId,
   isGroup,
   onOpenImage,
+  onOpenPdf,
   onEdit,
   onDelete,
   onReact,
@@ -830,6 +857,7 @@ function MessageRow({
   meId: number;
   isGroup: boolean;
   onOpenImage: (a: AttachmentDTO) => void;
+  onOpenPdf: (a: AttachmentDTO) => void;
   onEdit: (message: MessageDTO) => void;
   onDelete: (message: MessageDTO) => void;
   onReact: (message: MessageDTO, emoji: string) => void;
@@ -867,6 +895,7 @@ function MessageRow({
                 meId={meId}
                 isMine
                 onOpenImage={onOpenImage}
+                onOpenPdf={onOpenPdf}
                 onJumpToMessage={onJumpToMessage}
                 onTriggerAction={(actionId) => onTriggerAction(message.id, actionId)}
               />
@@ -932,6 +961,7 @@ function MessageRow({
                 meId={meId}
                 isMine={false}
                 onOpenImage={onOpenImage}
+                onOpenPdf={onOpenPdf}
                 onJumpToMessage={onJumpToMessage}
                 onTriggerAction={(actionId) => onTriggerAction(message.id, actionId)}
               />
@@ -1118,6 +1148,7 @@ export default function ChatPage() {
   const scrollKeyRef = useRef<string>('');
   const lastMarkedId = useRef<number>(-1);
   const [lightbox, setLightbox] = useState<AttachmentDTO | null>(null);
+  const [pdfPreview, setPdfPreview] = useState<AttachmentDTO | null>(null);
   const [editing, setEditing] = useState<MessageDTO | null>(null);
   const [replyingTo, setReplyingTo] = useState<MessageDTO | null>(null);
   // The message currently flashed by a reply "jump to original" tap.
@@ -1637,6 +1668,7 @@ export default function ChatPage() {
                   meId={meId}
                   isGroup={isGroup}
                   onOpenImage={setLightbox}
+                  onOpenPdf={setPdfPreview}
                   onEdit={startEdit}
                   onDelete={handleDelete}
                   onReact={handleReact}
@@ -1729,6 +1761,7 @@ export default function ChatPage() {
           onClose={() => setLightbox(null)}
         />
       )}
+      {pdfPreview && <PdfViewer attachment={pdfPreview} onClose={() => setPdfPreview(null)} />}
       {showInfo && isGroup && chat && (
         <GroupInfo chat={chat} meId={meId} onClose={() => setShowInfo(false)} />
       )}

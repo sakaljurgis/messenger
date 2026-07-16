@@ -20,6 +20,12 @@ vi.mock('../lib/attachments', async (importActual) => {
   };
 });
 
+// Keep pdfjs-dist out of jsdom: a never-resolving document is enough to prove
+// the in-app viewer opened (PdfViewer's own tests cover rendering via its DI).
+vi.mock('../lib/pdf', () => ({
+  openPdfDocument: () => new Promise(() => {}),
+}));
+
 // A tiny in-memory stand-in for the Socket.IO client so tests can drive server
 // events synchronously (and no real connection is opened in jsdom).
 const socket = vi.hoisted(() => {
@@ -438,7 +444,10 @@ describe('ChatPage', () => {
 
   it('lightbox steps through every loaded photo in the chat (buttons + arrow keys)', async () => {
     // Three photos spread across two messages — the gallery spans the whole
-    // loaded window in thread order, not just the clicked message.
+    // loaded window in thread order, not just the clicked message. The dialog's
+    // accessible name tracks the CURRENT photo (neighbors are also mounted on
+    // the slide track, so alt-text queries would be ambiguous), and each
+    // navigation commits only after the slide animation lands (async).
     const older: MessageDTO = { ...msg(1, bob, ''), attachments: [imageAttachment(41, 'a.jpg')] };
     const newer: MessageDTO = {
       ...msg(2, bob, ''),
@@ -449,25 +458,27 @@ describe('ChatPage', () => {
 
     // Open the middle photo.
     await userEvent.click(await screen.findByAltText('b.jpg'));
-    const dialog = await screen.findByRole('dialog');
-    expect(within(dialog).getByAltText('b.jpg')).toBeInTheDocument();
+    let dialog = await screen.findByRole('dialog', { name: 'b.jpg' });
     expect(within(dialog).getByText('2 / 3')).toBeInTheDocument();
 
     // Next button → third photo; the next arrow disappears at the gallery end.
     await userEvent.click(within(dialog).getByRole('button', { name: 'Next photo' }));
-    expect(within(dialog).getByAltText('c.jpg')).toBeInTheDocument();
+    dialog = await screen.findByRole('dialog', { name: 'c.jpg' });
     expect(within(dialog).getByText('3 / 3')).toBeInTheDocument();
     expect(within(dialog).queryByRole('button', { name: 'Next photo' })).not.toBeInTheDocument();
 
     // Arrow keys walk back to the first photo, crossing the message boundary.
-    await userEvent.keyboard('{ArrowLeft}{ArrowLeft}');
-    expect(within(dialog).getByAltText('a.jpg')).toBeInTheDocument();
+    // One press per settled slide — input during the animation is ignored.
+    await userEvent.keyboard('{ArrowLeft}');
+    dialog = await screen.findByRole('dialog', { name: 'b.jpg' });
+    await userEvent.keyboard('{ArrowLeft}');
+    dialog = await screen.findByRole('dialog', { name: 'a.jpg' });
     expect(within(dialog).getByText('1 / 3')).toBeInTheDocument();
     expect(within(dialog).queryByRole('button', { name: 'Previous photo' })).not.toBeInTheDocument();
 
     // ArrowLeft at the start is a no-op, not a wrap-around.
     await userEvent.keyboard('{ArrowLeft}');
-    expect(within(dialog).getByAltText('a.jpg')).toBeInTheDocument();
+    expect(await screen.findByRole('dialog', { name: 'a.jpg' })).toBeInTheDocument();
   });
 
   it('lightbox swipes to the neighboring photo on touch (mobile)', async () => {
@@ -479,22 +490,30 @@ describe('ChatPage', () => {
     renderChatPage();
 
     await userEvent.click(await screen.findByAltText('b.jpg'));
-    const dialog = await screen.findByRole('dialog');
+    const dialog = await screen.findByRole('dialog', { name: 'b.jpg' });
 
-    // Swipe left (finger travels right→left) → next photo.
+    // Swipe left (finger travels right→left): drag past the commit threshold,
+    // release → the next photo slides in and commits after the animation.
     fireEvent.touchStart(dialog, { touches: [{ clientX: 300, clientY: 100 }] });
+    fireEvent.touchMove(dialog, { touches: [{ clientX: 220, clientY: 105 }] });
     fireEvent.touchEnd(dialog, { changedTouches: [{ clientX: 180, clientY: 110 }] });
-    expect(within(dialog).getByAltText('c.jpg')).toBeInTheDocument();
+    await screen.findByRole('dialog', { name: 'c.jpg' });
+
+    // The swipe's trailing synthetic click must NOT close the viewer.
+    fireEvent.click(dialog);
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
 
     // Swipe right → back to the previous photo.
     fireEvent.touchStart(dialog, { touches: [{ clientX: 100, clientY: 100 }] });
+    fireEvent.touchMove(dialog, { touches: [{ clientX: 200, clientY: 95 }] });
     fireEvent.touchEnd(dialog, { changedTouches: [{ clientX: 260, clientY: 95 }] });
-    expect(within(dialog).getByAltText('b.jpg')).toBeInTheDocument();
+    await screen.findByRole('dialog', { name: 'b.jpg' });
 
     // A mostly-vertical drag (scroll-ish gesture) does NOT navigate.
     fireEvent.touchStart(dialog, { touches: [{ clientX: 200, clientY: 100 }] });
+    fireEvent.touchMove(dialog, { touches: [{ clientX: 170, clientY: 300 }] });
     fireEvent.touchEnd(dialog, { changedTouches: [{ clientX: 140, clientY: 400 }] });
-    expect(within(dialog).getByAltText('b.jpg')).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'b.jpg' })).toBeInTheDocument();
   });
 
   it('lightbox for a single photo shows no navigation affordances', async () => {
@@ -600,21 +619,31 @@ describe('ChatPage', () => {
     expect(link).not.toHaveAttribute('target');
   });
 
-  it('opens a PDF attachment inline in the SAME tab (history back returns to the chat)', async () => {
+  it('opens a PDF attachment in the in-app viewer (no navigation to escape from)', async () => {
     const fileMsg: MessageDTO = { ...msg(1, bob, ''), attachments: [fileAttachment(9)] };
     stubFetch({ messages: [fileMsg] });
     renderChatPage();
 
     const name = await screen.findByText('report.pdf');
-    const link = name.closest('a') as HTMLAnchorElement;
-    // No ?download=1, no `download` attribute — opens inline in the viewer.
-    expect(link.getAttribute('href')).toBe('/api/attachments/9');
-    expect(link).not.toHaveAttribute('download');
-    // Same browsing context: `target="_blank"` in the installed PWA opens a
-    // history-less context the phone user can't back out of.
-    expect(link).not.toHaveAttribute('target');
+    // The card is a button, NOT a link: any navigation (same-tab or _blank)
+    // strands the installed-PWA user on the PDF with no back affordance.
+    expect(name.closest('a')).toBeNull();
+    const card = name.closest('button') as HTMLButtonElement;
     // Visual hint that this one opens rather than saves.
     expect(screen.getByText(`PDF · ${formatBytes(3_355_443)}`)).toBeInTheDocument();
+
+    await userEvent.click(card);
+
+    // The pdf.js overlay opens in-app (still loading here), with its own
+    // download and close controls; Escape closes it and the chat is intact.
+    const dialog = await screen.findByRole('dialog', { name: 'report.pdf' });
+    expect(within(dialog).getByRole('status', { name: 'Loading PDF' })).toBeInTheDocument();
+    expect(within(dialog).getByRole('link', { name: 'Download' }).getAttribute('href')).toBe(
+      '/api/attachments/9?download=1',
+    );
+    await userEvent.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.getByText('report.pdf')).toBeInTheDocument();
   });
 
   it('renders an attachment-only image message without a text bubble', async () => {
