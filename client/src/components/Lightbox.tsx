@@ -210,7 +210,7 @@ export default function Lightbox({
         {slides.map(({ image, pos }) => (
           <div
             key={image.id}
-            className="absolute inset-0 flex items-center justify-center"
+            className="absolute inset-y-0 w-full flex items-center justify-center"
             style={{ left: `${pos * 100}%` }}
           >
             <img
