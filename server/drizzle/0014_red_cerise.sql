@@ -1,0 +1,1 @@
+CREATE INDEX `messages_reply_to_idx` ON `messages` (`reply_to_id`);

@@ -340,6 +340,19 @@ export interface SearchResponse {
   nextCursor: number | null;
 }
 
+/**
+ * GET /api/chats/:id/messages/:messageId/thread — every message connected to
+ * the given one via reply links: the chain is walked up to its root, then all
+ * transitive replies to that root are collected, oldest-first (the root is
+ * always `messages[0]`). Tombstones stay in the thread like in normal history.
+ * Not paginated — threads are conversations, not archives.
+ */
+export interface ThreadResponse {
+  /** Id of the thread's first message (the one everything else replies into). */
+  rootId: number;
+  messages: MessageDTO[];
+}
+
 export interface ApiErrorBody {
   error: string;
 }

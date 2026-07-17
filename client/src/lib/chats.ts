@@ -17,6 +17,7 @@ import type {
   SearchResponse,
   SendMessageRequest,
   ServerToClientEvents,
+  ThreadResponse,
   UserDTO,
 } from '@messenger/shared';
 import { ApiError, apiDelete, apiGet, apiPatch, apiPost } from './api';
@@ -1026,6 +1027,91 @@ export function useMessages(chatId: number, options: UseMessagesOptions = {}): U
     loading,
     error,
   };
+}
+
+export interface UseThreadResult {
+  /** The whole thread, oldest-first (the root is always `messages[0]`). */
+  messages: MessageDTO[];
+  loading: boolean;
+  error: string | null;
+  /**
+   * Merge one message into the thread state (insert in id order, or replace an
+   * existing copy). For the results of OWN mutations issued through the main
+   * chat's useMessages instance — a send into the thread, an edit, an optimistic
+   * tombstone — so the overlay updates instantly instead of waiting for the
+   * socket echo (which then dedupes onto the merged copy).
+   */
+  mergeMessage: (message: MessageDTO) => void;
+}
+
+/**
+ * The full reply thread a message belongs to, via
+ * GET /api/chats/:chatId/messages/:anchorId/thread — server-collected, so the
+ * thread is complete even when most of it sits outside the loaded chat window.
+ * Live: a `message:new` whose reply target is already IN the thread is appended
+ * (that is exactly what makes a message part of the thread), and
+ * `message:updated` patches edits/deletes/reactions in place. Focus/reconnect
+ * refetches the thread wholesale, same catch-up idea as useMessages.
+ */
+export function useThread(chatId: number, anchorId: number): UseThreadResult {
+  const [messages, setMessages] = useState<MessageDTO[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    const res = await apiGet<ThreadResponse>(
+      `/api/chats/${chatId}/messages/${anchorId}/thread`,
+    );
+    setMessages((prev) => mergeMessages(prev, res.messages));
+  }, [chatId, anchorId]);
+
+  // Reset + initial fetch whenever the chat or the anchor changes.
+  useEffect(() => {
+    let cancelled = false;
+    setMessages([]);
+    setLoading(true);
+    setError(null);
+    load()
+      .catch((err) => {
+        if (!cancelled) setError(errorMessage(err, 'Failed to load thread'));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [load]);
+
+  useLiveRefresh(() => {
+    load().catch(() => {
+      /* transient failure — keep showing what we have */
+    });
+  });
+
+  // A new message JOINS the thread iff it replies to a message already in it —
+  // the same connected-component rule the server endpoint uses. Checked against
+  // current state (not a snapshot) so chained live replies each land.
+  useSocketEvent('message:new', (message) => {
+    if (message.chatId !== chatId || !message.replyTo) return;
+    setMessages((prev) =>
+      prev.some((m) => m.id === message.replyTo!.id) ? mergeMessages(prev, [message]) : prev,
+    );
+  });
+
+  // Live edit/delete/reaction/link-preview of a thread member: patch in place
+  // (replaceMessage never inserts, so other chat traffic is ignored).
+  useSocketEvent('message:updated', (message) => {
+    if (message.chatId === chatId) {
+      setMessages((prev) => replaceMessage(prev, message));
+    }
+  });
+
+  const mergeMessage = useCallback((message: MessageDTO) => {
+    setMessages((prev) => mergeMessages(prev, [message]));
+  }, []);
+
+  return { messages, loading, error, mergeMessage };
 }
 
 export interface UseMessageSearchResult {

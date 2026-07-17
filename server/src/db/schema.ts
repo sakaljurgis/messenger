@@ -144,7 +144,11 @@ export const messages = sqliteTable(
      */
     actionTaken: text('action_taken'),
   },
-  (t) => [index('messages_chat_idx').on(t.chatId, t.id)],
+  (t) => [
+    index('messages_chat_idx').on(t.chatId, t.id),
+    // Thread collection walks reply chains downwards (WHERE reply_to_id = ?).
+    index('messages_reply_to_idx').on(t.replyToId),
+  ],
 );
 
 /**

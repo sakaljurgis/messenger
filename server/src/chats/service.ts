@@ -7,6 +7,7 @@ import type {
   ReactionGroupDTO,
   ReplyToDTO,
   SearchResponse,
+  ThreadResponse,
 } from '@messenger/shared';
 import { and, asc, count, desc, eq, gt, inArray, isNull, lt, max, ne, sql } from 'drizzle-orm';
 import type { Db } from '../db/index.js';
@@ -1019,6 +1020,80 @@ export function listMessagesAround(
 }
 
 /**
+ * Fetches full { message, sender } rows for `ids` and assembles their DTOs in
+ * exactly the given order — the batch fetch itself is unordered; the caller's
+ * id list (an FTS match ranking, a thread walk) carries the meaning. Ids must
+ * reference existing messages (both callers derive them from queries over
+ * `messages` itself, so the non-null lookup is safe).
+ */
+function hydrateMessagesInOrder(db: Db, ids: number[]): MessageDTO[] {
+  const rowById = new Map(
+    db
+      .select({ message: messages, sender: users })
+      .from(messages)
+      .innerJoin(users, eq(users.id, messages.senderId))
+      .where(inArray(messages.id, ids))
+      .all()
+      .map((r) => [r.message.id, r] as const),
+  );
+  return assembleMessageDTOs(db, ids.map((id) => rowById.get(id)!));
+}
+
+/**
+ * The full reply thread the given message belongs to: the chain is walked UP to
+ * its root, then ALL transitive replies to that root are collected (the whole
+ * connected component, not just one branch), returned oldest-first — the root is
+ * always first. Returns null when the message isn't in this chat (route → 404,
+ * same no-existence-leak rule as ?around=). Not paginated: threads are human-
+ * sized conversations, and the personal-app scale never needs a cursor here.
+ *
+ * The walk uses the raw `reply_to_id` column, which soft-deletes keep intact —
+ * a tombstoned message mid-chain stays a link (and is returned as a tombstone
+ * DTO), so a thread can't fall apart because one message was deleted. Ids are
+ * monotonic and a reply's target must pre-exist it, so the graph is acyclic;
+ * the root is simply the smallest id the upward walk reaches (which also stays
+ * correct if a chat-teardown hard-delete ever severed a link via SET NULL).
+ */
+export function listThreadMessages(
+  db: Db,
+  chatId: number,
+  messageId: number,
+): ThreadResponse | null {
+  const anchor = db
+    .select({ id: messages.id })
+    .from(messages)
+    .where(and(eq(messages.id, messageId), eq(messages.chatId, chatId)))
+    .get();
+  if (!anchor) return null;
+
+  // The chat_id guard on every hop is belt-and-braces: createMessage already
+  // enforces same-chat replies, but a thread must never leak across chats even
+  // if the data were wrong.
+  const idRows = db.all(sql`
+    WITH RECURSIVE up(id, reply_to_id) AS (
+      SELECT id, reply_to_id FROM messages
+        WHERE id = ${messageId} AND chat_id = ${chatId}
+      UNION ALL
+      SELECT m.id, m.reply_to_id FROM messages m
+        JOIN up ON m.id = up.reply_to_id
+        WHERE m.chat_id = ${chatId}
+    ),
+    root(id) AS (SELECT MIN(id) FROM up),
+    thread(id) AS (
+      SELECT id FROM root
+      UNION ALL
+      SELECT m.id FROM messages m
+        JOIN thread ON m.reply_to_id = thread.id
+        WHERE m.chat_id = ${chatId}
+    )
+    SELECT id FROM thread ORDER BY id ASC
+  `) as { id: number }[];
+
+  const threadIds = idRows.map((r) => r.id);
+  return { rootId: threadIds[0]!, messages: hydrateMessagesInOrder(db, threadIds) };
+}
+
+/**
  * Turns raw user search input into a safe FTS5 MATCH expression. Each
  * whitespace-separated term becomes a double-quoted prefix token (`"term"*`) so
  * that FTS5 operators and syntax in the input — `-` (NOT), `NEAR`, `AND`/`OR`,
@@ -1078,18 +1153,7 @@ export function searchMessages(
   const pageIds = (hasMore ? idRows.slice(0, limit) : idRows).map((r) => r.id);
   if (pageIds.length === 0) return { messages: [], nextCursor: null };
 
-  // Reorder the fetched rows back into the id DESC (newest-first) match order.
-  const rowById = new Map(
-    db
-      .select({ message: messages, sender: users })
-      .from(messages)
-      .innerJoin(users, eq(users.id, messages.senderId))
-      .where(inArray(messages.id, pageIds))
-      .all()
-      .map((r) => [r.message.id, r] as const),
-  );
-  const orderedRows = pageIds.map((id) => rowById.get(id)!);
-  const dtos = assembleMessageDTOs(db, orderedRows);
-
+  // Hydration preserves the id DESC (newest-first) match order of pageIds.
+  const dtos = hydrateMessagesInOrder(db, pageIds);
   return { messages: dtos, nextCursor: hasMore ? pageIds[pageIds.length - 1]! : null };
 }

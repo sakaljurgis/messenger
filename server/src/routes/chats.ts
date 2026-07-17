@@ -16,6 +16,7 @@ import {
   listMessages,
   listMessagesAfter,
   listMessagesAround,
+  listThreadMessages,
   toggleReaction,
   triggerAction,
 } from '../chats/service.js';
@@ -248,6 +249,24 @@ export function chatsRouter(db: Db, events: ChatEvents, storage: Storage): Route
     }
     const before = parseCursor(req.query.before);
     res.status(200).json(listMessages(db, chatId, before, limit));
+  });
+
+  // GET /api/chats/:id/messages/:messageId/thread — the full reply thread the
+  // message belongs to (root + all transitive replies), oldest-first.
+  router.get('/:id/messages/:messageId/thread', requireAuth, (req, res) => {
+    const me = req.user!;
+    const chatId = parseId(req.params.id);
+    if (chatId === null || !getChatForMember(db, chatId, me.id)) {
+      res.status(404).json(CHAT_NOT_FOUND);
+      return;
+    }
+    const messageId = parseId(req.params.messageId);
+    const thread = messageId === null ? null : listThreadMessages(db, chatId, messageId);
+    if (!thread) {
+      res.status(404).json(MESSAGE_NOT_FOUND);
+      return;
+    }
+    res.status(200).json(thread);
   });
 
   // POST /api/chats/:id/messages — send a message. Same path bots use via

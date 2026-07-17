@@ -60,6 +60,18 @@ interface ComposerProps {
   replyingTo?: MessageDTO | null;
   /** Leave reply mode without sending (✕ button / Escape). */
   onCancelReply?: () => void;
+  /**
+   * Implicit reply target attached to every send (and scheduled send) when the
+   * user hasn't picked one via `replyingTo`. No banner shows for it. Used by
+   * the thread overlay's composer, where each message replies to the thread
+   * root so it joins the thread.
+   */
+  fixedReplyToId?: number;
+  /**
+   * Extra localStorage draft-key scope so a second composer on the SAME chat
+   * (the thread overlay) keeps its own draft instead of stomping the main one.
+   */
+  draftScope?: string;
 }
 
 /** One-line preview of the quoted message for the reply banner. */
@@ -83,15 +95,15 @@ const TYPING_THROTTLE_MS = 2000;
 /** Auto-grow the textarea up to this many pixels (~5 lines), then scroll inside. */
 const MAX_TEXTAREA_HEIGHT = 128;
 
-/** localStorage key holding the unsent draft for a chat. */
-function draftKey(chatId: number): string {
-  return `draft:chat:${chatId}`;
+/** localStorage key holding the unsent draft for a chat (scope: see draftScope prop). */
+function draftKey(chatId: number, scope?: string): string {
+  return scope ? `draft:chat:${chatId}:${scope}` : `draft:chat:${chatId}`;
 }
 
 /** Read a chat's saved draft (or '' when none / storage is unavailable). */
-function loadDraft(chatId: number): string {
+function loadDraft(chatId: number, scope?: string): string {
   try {
-    return localStorage.getItem(draftKey(chatId)) ?? '';
+    return localStorage.getItem(draftKey(chatId, scope)) ?? '';
   } catch {
     return '';
   }
@@ -99,19 +111,19 @@ function loadDraft(chatId: number): string {
 
 /** Persist a chat's draft; an empty/blank value removes the key. Storage errors
  *  (private mode, quota) are swallowed — a lost draft must never break sending. */
-function saveDraft(chatId: number, value: string): void {
+function saveDraft(chatId: number, value: string, scope?: string): void {
   try {
-    if (value.trim().length === 0) localStorage.removeItem(draftKey(chatId));
-    else localStorage.setItem(draftKey(chatId), value);
+    if (value.trim().length === 0) localStorage.removeItem(draftKey(chatId, scope));
+    else localStorage.setItem(draftKey(chatId, scope), value);
   } catch {
     // ignore
   }
 }
 
 /** Drop a chat's draft entirely (on successful send). */
-function clearDraft(chatId: number): void {
+function clearDraft(chatId: number, scope?: string): void {
   try {
-    localStorage.removeItem(draftKey(chatId));
+    localStorage.removeItem(draftKey(chatId, scope));
   } catch {
     // ignore
   }
@@ -344,6 +356,8 @@ export default function Composer({
   onCancelEdit,
   replyingTo = null,
   onCancelReply,
+  fixedReplyToId,
+  draftScope,
 }: ComposerProps) {
   const [text, setText] = useState('');
   const [mention, setMention] = useState<MentionState | null>(null);
@@ -435,7 +449,7 @@ export default function Composer({
         }
       });
     } else {
-      setText(loadDraft(chatId));
+      setText(loadDraft(chatId, draftScope));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editingId]);
@@ -444,7 +458,7 @@ export default function Composer({
   // on chat switch). Skipped while editing — the edit text owns the input then.
   useEffect(() => {
     if (editing) return;
-    setText(loadDraft(chatId));
+    setText(loadDraft(chatId, draftScope));
     setMention(null);
     picked.current = [];
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -581,7 +595,8 @@ export default function Composer({
       mentions: extractMentions(content, picked.current),
       scheduledAt: when.toISOString(),
     };
-    if (replyingTo) body.replyToId = replyingTo.id;
+    const scheduleReplyTo = replyingTo?.id ?? fixedReplyToId;
+    if (scheduleReplyTo) body.replyToId = scheduleReplyTo;
 
     try {
       await apiPost(`/api/chats/${chatId}/scheduled`, body);
@@ -594,7 +609,7 @@ export default function Composer({
     setText('');
     setMention(null);
     picked.current = [];
-    clearDraft(chatId);
+    clearDraft(chatId, draftScope);
     onCancelReply?.();
     showScheduledNotice(`Scheduled for ${formatScheduleTime(when)}`);
     void refreshScheduled();
@@ -816,7 +831,7 @@ export default function Composer({
    *  the edited message text is transient and must not clobber the saved draft. */
   function persistDraft(value: string) {
     if (isEditing) return;
-    saveDraft(chatId, value);
+    saveDraft(chatId, value, draftScope);
   }
 
   /** Signal that I'm typing in this chat — throttled, and only for non-empty text. */
@@ -967,10 +982,10 @@ export default function Composer({
     setMention(null);
     picked.current = [];
     setPending([]);
-    clearDraft(chatId); // the draft is now on its way; a failure re-persists it
+    clearDraft(chatId, draftScope); // the draft is now on its way; a failure re-persists it
 
     try {
-      await onSend(content, mentions, attachmentIds, replyingTo?.id);
+      await onSend(content, mentions, attachmentIds, replyingTo?.id ?? fixedReplyToId);
     } catch (err) {
       restoreAfterFailure(prevText, prevPicked, prevPending);
       setSendError(err instanceof Error ? err.message : 'Failed to send');

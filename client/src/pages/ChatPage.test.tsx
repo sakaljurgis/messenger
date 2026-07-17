@@ -130,6 +130,9 @@ function stubFetch(options: {
   /** POST /messages/:id/actions — trigger a bot action button (defaults to 204).
    *  May return a Promise so a test can hold it pending (busy-state assertions). */
   onAction?: (id: number) => Response | Promise<Response>;
+  /** GET /messages/:id/thread — the full reply thread (defaults to 404 so
+   *  tests that never open a thread don't have to declare one). */
+  onThread?: (id: number) => { rootId: number; messages: MessageDTO[] };
 }) {
   const chat = options.chat ?? dmChat;
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -154,6 +157,14 @@ function stubFetch(options: {
       // .../messages/<id>/actions -> the id is the second-to-last path segment.
       const id = Number(url.split('/').at(-2));
       return options.onAction ? options.onAction(id) : jsonResponse(204, {});
+    }
+    // Must precede the generic /messages GET matcher below, which would
+    // otherwise swallow the thread URL and return a MessagesPage-shaped body.
+    if (url.match(/\/messages\/\d+\/thread$/) && method === 'GET') {
+      const id = Number(url.split('/').at(-2));
+      return options.onThread
+        ? jsonResponse(200, options.onThread(id))
+        : jsonResponse(404, { error: 'Message not found' });
     }
     if (url.includes('/messages') && method === 'GET') {
       const params = new URL(url, 'http://localhost').searchParams;
@@ -1387,26 +1398,112 @@ describe('ChatPage', () => {
     expect(screen.getByRole('button', { name: 'Replying to Unknown' })).toBeInTheDocument();
   });
 
-  it('tapping the quote scrolls to the loaded original message', async () => {
+  it('tapping the quote opens the thread view (no quote chips inside it)', async () => {
+    const original = msg(1, bob, 'the original bubble');
+    const replyMsg: MessageDTO = {
+      ...msg(2, me, 'reply body'),
+      replyTo: { id: 1, senderId: bob.id, content: 'orig', isDeleted: false, hasAttachments: false },
+    };
+    const fetchMock = stubFetch({
+      messages: [original, replyMsg],
+      onThread: () => ({ rootId: 1, messages: [original, replyMsg] }),
+    });
+    renderChatPage();
+
+    await screen.findByText('reply body');
+    await userEvent.click(screen.getByRole('button', { name: 'Replying to Bob' }));
+
+    // The thread endpoint was hit for the quote's target and the overlay shows
+    // the whole chain, labelled with its reply count.
+    const dialog = await screen.findByRole('dialog', { name: 'Thread' });
+    expect(fetchMock.mock.calls.some(([i]) => i.toString().includes('/messages/1/thread'))).toBe(
+      true,
+    );
+    expect(within(dialog).getByText('the original bubble')).toBeInTheDocument();
+    expect(within(dialog).getByText('reply body')).toBeInTheDocument();
+    expect(within(dialog).getAllByText('1 reply').length).toBeGreaterThan(0);
+    // Inside the thread the chain itself is the context — no quote chips.
+    expect(
+      within(dialog).queryByRole('button', { name: 'Replying to Bob' }),
+    ).not.toBeInTheDocument();
+
+    // The ✕ closes the overlay again.
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Close thread' }));
+    expect(screen.queryByRole('dialog', { name: 'Thread' })).not.toBeInTheDocument();
+  });
+
+  it("thread 'Show in chat' closes the overlay and scrolls to + flashes the loaded message", async () => {
     const scrollSpy = vi
       .spyOn(HTMLElement.prototype, 'scrollIntoView')
       .mockImplementation(() => {});
     try {
+      const original = msg(1, bob, 'the original bubble');
       const replyMsg: MessageDTO = {
         ...msg(2, me, 'reply body'),
         replyTo: { id: 1, senderId: bob.id, content: 'orig', isDeleted: false, hasAttachments: false },
       };
-      stubFetch({ messages: [msg(1, bob, 'the original bubble'), replyMsg] });
+      stubFetch({
+        messages: [original, replyMsg],
+        onThread: () => ({ rootId: 1, messages: [original, replyMsg] }),
+      });
       renderChatPage();
 
       await screen.findByText('reply body');
-      scrollSpy.mockClear(); // ignore the initial auto-scroll-to-bottom
-
       await userEvent.click(screen.getByRole('button', { name: 'Replying to Bob' }));
-      expect(scrollSpy).toHaveBeenCalled();
+      const dialog = await screen.findByRole('dialog', { name: 'Thread' });
+
+      // Long-press menu on the root message inside the overlay → Show in chat.
+      const wrap = within(dialog).getByText('the original bubble').closest('.group')!;
+      await userEvent.click(within(wrap as HTMLElement).getByLabelText('Message actions'));
+      scrollSpy.mockClear(); // ignore the page's initial auto-scroll-to-bottom
+      await userEvent.click(await screen.findByRole('menuitem', { name: 'Show in chat' }));
+
+      // The overlay closes, and the loaded original is centred + flashed.
+      await waitFor(() =>
+        expect(screen.queryByRole('dialog', { name: 'Thread' })).not.toBeInTheDocument(),
+      );
+      expect(scrollSpy).toHaveBeenCalledWith({ behavior: 'smooth', block: 'center' });
+      expect(document.getElementById('message-1')!.className).toContain('bg-[#0084ff]/10');
     } finally {
       scrollSpy.mockRestore();
     }
+  });
+
+  it("thread 'Show in chat' falls back to focus mode when the message is outside the window", async () => {
+    const original = msg(1, bob, 'the original message body');
+    const replyMsg: MessageDTO = {
+      ...msg(10, me, 'my reply'),
+      replyTo: { id: 1, senderId: bob.id, content: 'orig', isDeleted: false, hasAttachments: false },
+    };
+    // The original is NOT in the loaded window — only the server-collected
+    // thread has it, so Show in chat must route through ?message= focus mode.
+    const fetchMock = stubFetch({
+      messages: [replyMsg],
+      onThread: () => ({ rootId: 1, messages: [original, replyMsg] }),
+      onAround: () => ({
+        messages: [original, msg(2, me, 'x'), replyMsg],
+        nextCursor: null,
+        newerCursor: null,
+      }),
+    });
+    renderChatPage();
+
+    await screen.findByText('my reply');
+    await userEvent.click(screen.getByRole('button', { name: 'Replying to Bob' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Thread' });
+
+    const wrap = within(dialog).getByText('the original message body').closest('.group')!;
+    await userEvent.click(within(wrap as HTMLElement).getByLabelText('Message actions'));
+    await userEvent.click(await screen.findByRole('menuitem', { name: 'Show in chat' }));
+
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Thread' })).not.toBeInTheDocument(),
+    );
+    // Focus mode re-fetched a window centred on the original.
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.some(([i]) => i.toString().includes('around=1'))).toBe(true),
+    );
+    expect(await screen.findByText('the original message body')).toBeInTheDocument();
   });
 
   it('applies a reaction live when a message:updated with reactions arrives', async () => {
@@ -1716,29 +1813,27 @@ describe('ChatPage', () => {
       ).toBe(true);
     });
 
-    it('reply-jump falls back to focus mode when the quoted original is not loaded', async () => {
+    it('the thread shows the whole chain even when the original is outside the loaded window', async () => {
       const replyMsg: MessageDTO = {
         ...msg(10, me, 'my reply'),
         replyTo: { id: 1, senderId: bob.id, content: 'orig', isDeleted: false, hasAttachments: false },
       };
-      // Newest page: only the reply — the original (id 1) is far up the history.
-      const fetchMock = stubFetch({
+      // Newest page: only the reply — the original (id 1) is far up the
+      // history. The server-collected thread still contains it.
+      stubFetch({
         messages: [replyMsg],
-        onAround: () => ({
-          messages: [msg(1, bob, 'the original message body'), msg(2, me, 'x'), replyMsg],
-          nextCursor: null,
-          newerCursor: null,
+        onThread: () => ({
+          rootId: 1,
+          messages: [msg(1, bob, 'the original message body'), replyMsg],
         }),
       });
       renderChatPage();
 
       await screen.findByText('my reply');
-
-      // Tapping the quote can't scroll (original not loaded) → focus-mode fallback.
       await userEvent.click(screen.getByRole('button', { name: 'Replying to Bob' }));
 
-      expect(await screen.findByText('the original message body')).toBeInTheDocument();
-      expect(fetchMock.mock.calls.some(([i]) => i.toString().includes('around=1'))).toBe(true);
+      const dialog = await screen.findByRole('dialog', { name: 'Thread' });
+      expect(within(dialog).getByText('the original message body')).toBeInTheDocument();
     });
   });
 

@@ -5,7 +5,12 @@ auth, profile editing (name + password + accent color), DMs + group chats
 (group-info sheet: add members, rename, mute, leave; last member out deletes
 the chat), notes-to-self DMs, @mentions, markdown messages (react-markdown
 behind a configurable module in client/src/lib/markdown), emoji reactions,
-replies with jump-to-original, FTS5 message search with windowed history
+replies with a thread view (tapping the quote chip opens a full-screen overlay
+with the whole reply chain — server-collected via recursive CTE at
+GET /messages/:id/thread so it spans beyond the loaded window; its composer
+replies to the thread ROOT, Reply is hidden inside so no sub-threads, and
+"Show in chat" in the long-press menu jumps to the original; ?thread= URL
+param so the back button closes it), FTS5 message search with windowed history
 (?around=/?after=), Socket.IO real-time, web push + per-chat mute, webhook
 bots (management UI at /bots; deletes are soft — users.deletedAt — so message
 history keeps its sender), attachments (client compression + HD toggle, sharp
