@@ -1,3 +1,6 @@
 [submodule "reminder-bot"]
 	path = reminder-bot
 	url = https://github.com/sakaljurgis/messenger-reminder-bot.git
+[submodule "chat-bot"]
+	path = chat-bot
+	url = https://github.com/sakaljurgis/messenger-chat-bot
