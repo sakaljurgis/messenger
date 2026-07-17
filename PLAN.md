@@ -54,8 +54,9 @@ sessions           token, user_id, expires_at
 chats              id, type ('dm'|'group'), name (null for dm), dm_key (unique,
                    "minUserId:maxUserId", null for groups), created_by, created_at
 chat_members       chat_id, user_id, joined_at, last_read_message_id   [PK: chat_id+user_id]
-messages           id, chat_id, sender_id, content, created_at,
-                   edited_at?, deleted_at? (soft delete → tombstone)
+messages           id, chat_id, sender_id, content, reply_to_id? (self-FK,
+                   SET NULL on chat teardown; reply chains form threads),
+                   created_at, edited_at?, deleted_at? (soft delete → tombstone)
 message_mentions   message_id, user_id
 attachments        id, chat_id, uploader_id, message_id? (null until linked
                    on send), kind ('image'|'file'), original_name, mime_type,
@@ -97,7 +98,9 @@ POST   /api/chats/:id/leave      leave a group; the last member out deletes
                                  the chat (+ attachment files on disk)
 GET    /api/chats/:id            single chat summary (member-only)
 GET    /api/chats/:id/messages   cursor-paginated, newest first
-POST   /api/chats/:id/messages   { content, mentions?, attachmentIds? }
+GET    /api/chats/:id/messages/:mid/thread   full reply chain: root + all
+                                 transitive replies, oldest-first (recursive CTE)
+POST   /api/chats/:id/messages   { content, mentions?, attachmentIds?, replyToId? }
 PATCH  /api/chats/:id/messages/:mid   edit own message { content, mentions? }
 DELETE /api/chats/:id/messages/:mid   soft-delete own message (tombstone)
 POST   /api/chats/:id/read       mark read up to message id (emits read:updated)
@@ -252,6 +255,19 @@ Each phase ends in a working, demoable state.
       bot from every chat, notifying members like a leave.
 - [x] **DM bubble fix**: the 32px avatar gutter on received messages renders
       only in groups (it exists to hold the sender avatar).
+
+## Later additions (selected)
+
+- [x] **Reply threads** (2026-07-17): tapping a reply's quote chip opens a
+      full-screen thread view collecting every message connected via reply-to
+      links. The chain is walked server-side (recursive CTE behind
+      `GET /api/chats/:id/messages/:mid/thread`, new index on
+      `messages.reply_to_id`) so it is complete beyond the loaded history
+      window. The overlay reuses the message renderer extracted to
+      `client/src/components/MessageRow.tsx`, hides quote chips (the chain is
+      the context), swaps Reply for a "Show in chat" jump, and carries its own
+      composer whose sends reply to the thread ROOT — threads never nest. A
+      `?thread=` URL param makes the Android back button close the overlay.
 
 ## Deliberate cuts (still out of scope)
 

@@ -12,12 +12,15 @@ daily use. See [PLAN.md](PLAN.md) for the architecture history and
 **Conversations**
 - 1:1 DMs, group chats (create, rename, add/remove members, leave — the last
   member out deletes the chat), and a notes-to-self DM
-- Replies with quoted snippets — tap a quote to jump to the original, even
-  deep into history
+- Replies with quoted snippets — tapping a quote opens the whole reply chain
+  in a full-screen thread view (collected server-side, so it's complete even
+  deep into history) with its own composer: everything you send there replies
+  to the thread root, so conversations thread without ever nesting
 - Emoji reactions (fixed six-emoji picker, tap-to-toggle chips)
 - Edit and delete your own messages (deletes leave a neutral tombstone)
 - Long-press / hover popover per bubble: react, copy, reply, edit, delete —
-  position-aware so it never opens off-screen
+  position-aware so it never opens off-screen (inside a thread, Reply becomes
+  "Show in chat", which jumps to the message in the main conversation)
 
 **Writing**
 - Markdown subset: **bold**, *italic*, ~~strike~~, `code`, code blocks,
