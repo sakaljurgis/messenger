@@ -346,6 +346,11 @@ export interface SearchResponse {
  * transitive replies to that root are collected, oldest-first (the root is
  * always `messages[0]`). Tombstones stay in the thread like in normal history.
  * Not paginated — threads are conversations, not archives.
+ *
+ * Also served to bots (Bearer auth) at
+ * GET /api/bot/messages/:messageId/thread?chatId=<id> — same shape, same
+ * 404 rules; the chat id moves to the query because bot routes aren't
+ * chat-scoped.
  */
 export interface ThreadResponse {
   /** Id of the thread's first message (the one everything else replies into). */

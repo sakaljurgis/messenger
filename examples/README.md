@@ -136,7 +136,43 @@ persisted, and clients expire the indicator after a few seconds: a bot doing
 slow work (say, an LLM call) should re-send every ~3 s until done. Non-member
 → `404`, missing `chatId` → `400`.
 
-## 5. Scheduling — send later
+## 5. Identity — `GET /api/bot/me`
+
+Returns the calling bot's own `UserDTO` (`{ "user": { id, displayName, isBot,
+… } }`; never `apiToken`/`passwordHash`). Same Bearer auth. A bot uses it to
+learn its **own user id** at startup instead of every deployment carrying a
+hand-copied id env — the id is what makes `@mention` detection in group chats
+reliable (matching on display-name text alone breaks the moment the bot's
+name and its configured trigger word differ). Both submodule bots call it
+lazily and fall back gracefully on older servers that lack the route.
+
+```bash
+curl -H "Authorization: Bearer $BOT_TOKEN" http://localhost:3001/api/bot/me
+# -> { "user": { "id": 7, "displayName": "Chat", "isBot": true, ... } }
+```
+
+## 6. Reading — `GET /api/bot/messages/:messageId/thread`
+
+The one read endpoint. Same Bearer auth; `?chatId=<id>` is **required** (bot
+routes aren't chat-scoped, so the chat travels in the query — `400` without
+it). Returns the full reply thread the given message belongs to, exactly like
+the human thread route: the chain is walked up to its root, then all
+transitive replies to that root are collected, oldest-first (the root is
+always `messages[0]`):
+
+```bash
+curl -H "Authorization: Bearer $BOT_TOKEN" \
+  "http://localhost:3001/api/bot/messages/42/thread?chatId=1"
+# -> { "rootId": 7, "messages": [ ...MessageDTO[], oldest first ] }
+```
+
+Non-member chat → `404 "Chat not found"`; a message id that isn't in that
+chat → `404 "Message not found"` (no existence leaks). Tombstoned messages
+stay in the thread as tombstones. This is what lets a conversational bot
+treat "user replied into a thread" as "load the whole conversation" without
+keeping its own message cache (`chat-bot/` uses it for exactly that).
+
+## 7. Scheduling — send later
 
 Three Bearer-authenticated endpoints mirror the human send-later routes. Because
 the bot API isn't chat-scoped, the chat id travels in the **body** (POST) or the
@@ -189,9 +225,13 @@ sending: if the bot has **left the chat**, the row is dropped silently; if the
 `replyToId` target has since been **deleted**, the message still goes out, just
 without the quote (degrade, don't drop).
 
-## 6. What a bot can't do
+## 8. What a bot can't do
 
-The bot API is deliberately send-shaped. Bots **cannot**:
+The bot API is deliberately send-shaped (plus the identity and thread reads
+above). Bots **cannot**:
+
+- read arbitrary chat history or search — the only reads are its own identity
+  (§5) and the reply-thread endpoint (§6);
 
 - edit or delete their own (or any) messages — there is no bot edit/delete route;
 - react to messages with emoji;
@@ -200,7 +240,7 @@ The bot API is deliberately send-shaped. Bots **cannot**:
 - upload or schedule attachments — the upload endpoint is session-only, and
   scheduled messages are text only.
 
-## 7. Walkthrough — `examples/echo-bot.mjs`
+## 9. Walkthrough — `examples/echo-bot.mjs`
 
 Run it against a bot that has a `webhookUrl`:
 

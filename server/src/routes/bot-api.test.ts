@@ -542,3 +542,116 @@ describe('POST /api/bot/typing', () => {
     expect(res.status).toBe(401);
   });
 });
+
+describe('GET /api/bot/messages/:messageId/thread', () => {
+  let db: Db;
+  let app: App;
+  let alice: Actor;
+  let bot: UserDTO;
+  let apiToken: string;
+  let dmId: number;
+
+  function botThread(token: string, messageId: number | string, query = '') {
+    return request(app)
+      .get(`/api/bot/messages/${messageId}/thread${query}`)
+      .set('Authorization', `Bearer ${token}`);
+  }
+
+  beforeEach(async () => {
+    db = createDb(':memory:');
+    app = createApp(db);
+    alice = await register(app, 'alice@example.com', 'Alice');
+    ({ bot, apiToken } = await createBot(alice, 'Chat Bot'));
+    dmId = (await alice.agent.post('/api/chats').send({ userId: bot.id })).body.chat.id as number;
+  });
+
+  it('returns the full thread, root first, from any anchor', async () => {
+    const root = (
+      await alice.agent.post(`/api/chats/${dmId}/messages`).send({ content: 'what is 2+2?' })
+    ).body.message as MessageDTO;
+    const botReply = (
+      await botSend(app, apiToken, { chatId: dmId, content: '4', replyToId: root.id })
+    ).body.message as MessageDTO;
+    const followUp = (
+      await alice.agent
+        .post(`/api/chats/${dmId}/messages`)
+        .send({ content: 'and times 3?', replyToId: root.id })
+    ).body.message as MessageDTO;
+    // A message outside the thread must not leak in.
+    await alice.agent.post(`/api/chats/${dmId}/messages`).send({ content: 'unrelated' });
+
+    const res = await botThread(apiToken, followUp.id, `?chatId=${dmId}`);
+    expect(res.status).toBe(200);
+    expect(res.body.rootId).toBe(root.id);
+    expect((res.body.messages as MessageDTO[]).map((m) => m.id)).toEqual([
+      root.id,
+      botReply.id,
+      followUp.id,
+    ]);
+    expect((res.body.messages as MessageDTO[])[1]!.sender.id).toBe(bot.id);
+  });
+
+  it('requires the chatId query parameter (400)', async () => {
+    const root = (
+      await alice.agent.post(`/api/chats/${dmId}/messages`).send({ content: 'hi' })
+    ).body.message as MessageDTO;
+    const res = await botThread(apiToken, root.id);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('chatId query parameter is required');
+  });
+
+  it('returns 404 (no leak) for a chat the bot is not a member of', async () => {
+    const bob = await register(app, 'bob@example.com', 'Bob');
+    const otherDm = (await alice.agent.post('/api/chats').send({ userId: bob.user.id })).body.chat
+      .id as number;
+    const msg = (
+      await alice.agent.post(`/api/chats/${otherDm}/messages`).send({ content: 'private' })
+    ).body.message as MessageDTO;
+
+    const res = await botThread(apiToken, msg.id, `?chatId=${otherDm}`);
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Chat not found');
+  });
+
+  it("returns 404 for a message that isn't in the given chat", async () => {
+    const bob = await register(app, 'bob@example.com', 'Bob');
+    const otherDm = (await alice.agent.post('/api/chats').send({ userId: bob.user.id })).body.chat
+      .id as number;
+    const foreign = (
+      await alice.agent.post(`/api/chats/${otherDm}/messages`).send({ content: 'elsewhere' })
+    ).body.message as MessageDTO;
+
+    const res = await botThread(apiToken, foreign.id, `?chatId=${dmId}`);
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Message not found');
+  });
+
+  it('rejects a bad token with 401', async () => {
+    const res = await botThread('garbage', 1, `?chatId=${dmId}`);
+    expect(res.status).toBe(401);
+  });
+});
+
+describe('GET /api/bot/me', () => {
+  it("returns the calling bot's own sanitized UserDTO", async () => {
+    const db = createDb(':memory:');
+    const app = createApp(db);
+    const alice = await register(app, 'alice@example.com', 'Alice');
+    const { bot, apiToken } = await createBot(alice, 'Chat Bot');
+
+    const res = await request(app).get('/api/bot/me').set('Authorization', `Bearer ${apiToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.user.id).toBe(bot.id);
+    expect(res.body.user.displayName).toBe('Chat Bot');
+    expect(res.body.user.isBot).toBe(true);
+    expect(res.body.user.apiToken).toBeUndefined();
+    expect(res.body.user.passwordHash).toBeUndefined();
+  });
+
+  it('rejects a bad token with 401', async () => {
+    const db = createDb(':memory:');
+    const app = createApp(db);
+    const res = await request(app).get('/api/bot/me').set('Authorization', 'Bearer garbage');
+    expect(res.status).toBe(401);
+  });
+});

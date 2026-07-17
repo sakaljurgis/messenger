@@ -161,6 +161,11 @@ Incoming messages in the bot's chats are POSTed to its webhook (5s timeout,
 one retry); the bot replies through `POST /api/bot/messages` with its Bearer
 token and the reply fans out to sockets and push like any human message.
 
+Two real bots live as submodules, each with its own README and deploy story:
+[`reminder-bot/`](reminder-bot/) (natural-language reminders via a local LLM)
+and [`chat-bot/`](chat-bot/) (a conversational assistant that treats reply
+threads as conversations; any OpenAI-compatible provider).
+
 ## Architecture in one paragraph
 
 npm workspaces monorepo: `shared/` (TypeScript DTO + socket event types),

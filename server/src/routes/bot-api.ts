@@ -1,9 +1,15 @@
 import { and, eq } from 'drizzle-orm';
 import { Router, type RequestHandler } from 'express';
 import { z } from 'zod';
-import { createMessage, getChatForMember, getMemberIds } from '../chats/service.js';
+import {
+  createMessage,
+  getChatForMember,
+  getMemberIds,
+  listThreadMessages,
+} from '../chats/service.js';
 import type { Db } from '../db/index.js';
 import { users } from '../db/schema.js';
+import { toUserDTO } from '../dto.js';
 import type { ChatEvents } from '../events.js';
 import {
   createScheduledMessage,
@@ -96,6 +102,14 @@ export function botApiRouter(db: Db, events: ChatEvents): Router {
   const router = Router();
   router.use(requireBotAuth(db));
 
+  // GET /api/bot/me — the calling bot's own UserDTO. Exists so a bot can
+  // learn its own user id at runtime instead of every deployment having to
+  // carry a hand-copied BOT_USER_ID env (the id is what makes @mention
+  // detection in groups reliable; getting it wrong made bots silently deaf).
+  router.get('/me', (req, res) => {
+    res.status(200).json({ user: toUserDTO(req.bot!) });
+  });
+
   // POST /api/bot/messages — a bot sends a message. Same rules as the human
   // endpoint: the bot must already be a member of the chat (404 otherwise).
   router.post('/messages', (req, res) => {
@@ -149,6 +163,33 @@ export function botApiRouter(db: Db, events: ChatEvents): Router {
     }
     events.emit('typing', { chat, memberIds: getMemberIds(db, chat.id), userId: req.bot!.id });
     res.status(204).end();
+  });
+
+  // GET /api/bot/messages/:messageId/thread?chatId=<id> — the Bearer mirror of
+  // the human thread route (routes/chats.ts): the full reply thread the message
+  // belongs to (root + all transitive replies, oldest-first, ThreadResponse).
+  // Lets a conversational bot rebuild a thread's history without keeping its
+  // own message cache. Chat id travels in the query since bot routes aren't
+  // chat-scoped; non-member → 404, message outside the chat → 404 — the same
+  // no-existence-leak rules as the human route.
+  router.get('/messages/:messageId/thread', (req, res) => {
+    const chatId = parseId(req.query.chatId);
+    if (chatId === null) {
+      res.status(400).json({ error: 'chatId query parameter is required' });
+      return;
+    }
+    const chat = getChatForMember(db, chatId, req.bot!.id);
+    if (!chat) {
+      res.status(404).json({ error: 'Chat not found' });
+      return;
+    }
+    const messageId = parseId(req.params.messageId);
+    const thread = messageId === null ? null : listThreadMessages(db, chat.id, messageId);
+    if (!thread) {
+      res.status(404).json({ error: 'Message not found' });
+      return;
+    }
+    res.status(200).json(thread);
   });
 
   // ── Scheduled ("send later") messages ──────────────────────────────────────
