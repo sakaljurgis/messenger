@@ -87,6 +87,8 @@ export interface TypingEvent {
   chat: ChatRow;
   memberIds: number[];
   userId: number;
+  /** The message the bot's coming reply targets (see BotTypingRequest). */
+  replyToId?: number;
 }
 
 interface EventMap {

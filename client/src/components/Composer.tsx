@@ -406,6 +406,17 @@ export default function Composer({
   // Reply mode is mutually exclusive with edit mode (enforced by the parent).
   const isReplying = !isEditing && replyingTo !== null;
   const replyingToId = replyingTo?.id ?? null;
+  // What the next send will reply to (banner target, else the thread root) —
+  // the typing signal carries it so a member with that thread open sees the
+  // indicator inside the thread, not just in the main list.
+  const typingReplyToId = replyingTo?.id ?? fixedReplyToId;
+
+  // A changed target (Reply tapped or cancelled) re-arms the throttle so the
+  // very next keystroke announces the new destination instead of waiting out
+  // the window with a stale one.
+  useEffect(() => {
+    lastTypingEmit.current = 0;
+  }, [typingReplyToId]);
 
   const trimmed = text.trim();
   const uploading = pending.some((p) => p.status === 'uploading');
@@ -834,13 +845,15 @@ export default function Composer({
     saveDraft(chatId, value, draftScope);
   }
 
-  /** Signal that I'm typing in this chat — throttled, and only for non-empty text. */
+  /** Signal that I'm typing in this chat (and toward which message, if replying)
+   *  — throttled, and only for non-empty text. */
   function emitTyping(value: string) {
     if (value.trim().length === 0) return;
     const now = Date.now();
     if (now - lastTypingEmit.current < TYPING_THROTTLE_MS) return;
     lastTypingEmit.current = now;
-    getSocket().emit('typing', chatId);
+    if (typingReplyToId !== undefined) getSocket().emit('typing', chatId, typingReplyToId);
+    else getSocket().emit('typing', chatId);
   }
 
   /** Recompute the autocomplete from the input's current value + caret. */

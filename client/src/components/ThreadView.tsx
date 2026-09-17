@@ -1,10 +1,11 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { AttachmentDTO, MessageDTO, UserDTO } from '@messenger/shared';
-import { tombstone, useThread, type UseMessagesResult } from '../lib/chats';
+import { tombstone, useThread, useThreadTyping, type UseMessagesResult } from '../lib/chats';
 import Composer from './Composer';
 import Lightbox from './Lightbox';
 import MessageRow, { buildRows } from './MessageRow';
 import PdfViewer from './PdfViewer';
+import TypingIndicator, { typingDisplayNames } from './TypingIndicator';
 
 /** Same near-bottom threshold as the main chat list (ChatPage). */
 const NEAR_BOTTOM_PX = 100;
@@ -31,7 +32,9 @@ function CloseIcon() {
  * thread messages. Mutations run through the SAME useMessages instance as the
  * main list (passed in as props) so both views stay consistent; their results
  * are merged into the thread state directly, with the socket echo deduping.
- * Live messages from others join via useThread's message:new rule.
+ * Live messages from others join via useThread's message:new rule, and the
+ * typing indicator under the last row follows the same rule: a typer shows
+ * here iff their signal's reply target is in this chain (see useThreadTyping).
  *
  * Escape closes the overlay — unless the thread's own lightbox/PDF viewer is
  * open (they own that Escape) or an edit is in progress (the composer's ✕
@@ -92,6 +95,14 @@ export default function ThreadView({
   // itself is the context.
   const rows = useMemo(() => buildRows(messages, meId, isGroup), [messages, meId, isGroup]);
 
+  // Who is typing a reply INTO this thread (bots included) — matched on the
+  // chain's message ids, so it grows with the thread.
+  const threadIds = useMemo(() => new Set(messages.map((m) => m.id)), [messages]);
+  const typingNames = typingDisplayNames(
+    useThreadTyping(chatId, meId, threadIds, anchorId),
+    members,
+  );
+
   // The thread's own photos back its lightbox gallery (the page's gallery only
   // spans the loaded chat window, which may not contain older thread photos).
   const galleryImages = useMemo(
@@ -112,11 +123,12 @@ export default function ThreadView({
   }, [lightbox, pdfPreview, editing, onClose]);
 
   // Pin to the bottom (the newest reply) when the thread loads, and keep
-  // following growth while the user hasn't scrolled up.
+  // following growth — a new row or the typing bubble appearing — while the
+  // user hasn't scrolled up.
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (el && stickToBottom.current) el.scrollTop = el.scrollHeight;
-  }, [loading, rows.length]);
+  }, [loading, rows.length, typingNames.length]);
 
   function onScroll() {
     const el = scrollRef.current;
@@ -208,39 +220,42 @@ export default function ThreadView({
           ) : error ? (
             <p className="py-10 text-center text-sm text-gray-400 dark:text-gray-500">{error}</p>
           ) : (
-            rows.map((row, i) => (
-              <div key={row.message.id}>
-                {i === 1 && (
-                  <div className="my-2 flex items-center gap-2 px-3" role="separator" aria-label={subtitle}>
-                    <span className="text-xs font-medium text-gray-500 dark:text-gray-400">
-                      {subtitle}
-                    </span>
-                    <div className="h-px flex-1 bg-gray-200 dark:bg-gray-700" />
-                  </div>
-                )}
-                {row.separatorLabel && (
-                  <div className="flex justify-center py-3">
-                    <span className="rounded-full bg-gray-100 px-3 py-1 text-xs font-medium text-gray-500 dark:bg-gray-800 dark:text-gray-400">
-                      {row.separatorLabel}
-                    </span>
-                  </div>
-                )}
-                <MessageRow
-                  row={row}
-                  members={members}
-                  meId={meId}
-                  isGroup={isGroup}
-                  onOpenImage={setLightbox}
-                  onOpenPdf={setPdfPreview}
-                  onEdit={setEditing}
-                  onDelete={handleDelete}
-                  onReact={handleReact}
-                  onCopy={handleCopy}
-                  onShowInChat={(m) => onShowInChat(m.id)}
-                  onTriggerAction={onTriggerAction}
-                />
-              </div>
-            ))
+            <>
+              {rows.map((row, i) => (
+                <div key={row.message.id}>
+                  {i === 1 && (
+                    <div className="my-2 flex items-center gap-2 px-3" role="separator" aria-label={subtitle}>
+                      <span className="text-xs font-medium text-gray-500 dark:text-gray-400">
+                        {subtitle}
+                      </span>
+                      <div className="h-px flex-1 bg-gray-200 dark:bg-gray-700" />
+                    </div>
+                  )}
+                  {row.separatorLabel && (
+                    <div className="flex justify-center py-3">
+                      <span className="rounded-full bg-gray-100 px-3 py-1 text-xs font-medium text-gray-500 dark:bg-gray-800 dark:text-gray-400">
+                        {row.separatorLabel}
+                      </span>
+                    </div>
+                  )}
+                  <MessageRow
+                    row={row}
+                    members={members}
+                    meId={meId}
+                    isGroup={isGroup}
+                    onOpenImage={setLightbox}
+                    onOpenPdf={setPdfPreview}
+                    onEdit={setEditing}
+                    onDelete={handleDelete}
+                    onReact={handleReact}
+                    onCopy={handleCopy}
+                    onShowInChat={(m) => onShowInChat(m.id)}
+                    onTriggerAction={onTriggerAction}
+                  />
+                </div>
+              ))}
+              <TypingIndicator names={typingNames} isGroup={isGroup} />
+            </>
           )}
         </div>
 

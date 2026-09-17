@@ -229,6 +229,71 @@ describe('ThreadView', () => {
     expect(within(dialog).queryByText('first reply')).not.toBeInTheDocument();
   });
 
+  it('shows a typing indicator for a typer whose reply target is in the thread and hides it on expiry', async () => {
+    stubFetch({ rootId: 1, messages: chain() });
+    renderThread();
+
+    const dialog = await screen.findByRole('dialog', { name: 'Thread' });
+    await within(dialog).findByText('second reply');
+
+    // Same fake-timer + Date.now recipe as ChatPage's typing test: the 1s sweep
+    // runs on fake timers, the 4s expiry reads the spied clock.
+    await waitFor(() => expect(socket.listenerCount('typing')).toBeGreaterThan(0));
+    let now = 100_000;
+    vi.useFakeTimers();
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      // Bob's thread composer replies to the root (id 1) → he is typing HERE.
+      act(() => {
+        socket.emit('typing', { chatId: 1, userId: bob.id, replyToId: 1 });
+      });
+      expect(within(dialog).getByText('Bob is typing…')).toBeInTheDocument();
+
+      now += 5000; // past the 4s expiry
+      act(() => {
+        vi.advanceTimersByTime(5000);
+      });
+      expect(within(dialog).queryByText('Bob is typing…')).not.toBeInTheDocument();
+    } finally {
+      nowSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('ignores chat-level typing, replies aimed at other threads or chats, and my own signal', async () => {
+    stubFetch({ rootId: 1, messages: chain() });
+    renderThread();
+
+    const dialog = await screen.findByRole('dialog', { name: 'Thread' });
+    await within(dialog).findByText('second reply');
+
+    await emitFromServer('typing', { chatId: 1, userId: bob.id }); // plain chat typing
+    await emitFromServer('typing', { chatId: 1, userId: bob.id, replyToId: 99 }); // another thread
+    await emitFromServer('typing', { chatId: 2, userId: bob.id, replyToId: 1 }); // another chat
+    await emitFromServer('typing', { chatId: 1, userId: me.id, replyToId: 1 }); // me
+    expect(within(dialog).queryByText(/is typing…/)).not.toBeInTheDocument();
+  });
+
+  it("accepts a reply aimed at any chain member and clears once the typer's message lands", async () => {
+    stubFetch({ rootId: 1, messages: chain() });
+    renderThread();
+
+    const dialog = await screen.findByRole('dialog', { name: 'Thread' });
+    await within(dialog).findByText('second reply');
+
+    // Bob's Reply banner targets the newest thread message (id 3), not the
+    // root — same connected component, so it counts.
+    await emitFromServer('typing', { chatId: 1, userId: bob.id, replyToId: 3 });
+    expect(within(dialog).getByText('Bob is typing…')).toBeInTheDocument();
+
+    await emitFromServer('message:new', {
+      ...msg(5, bob, 'the reply he was typing'),
+      replyTo: { id: 3, senderId: bob.id, content: 'second reply', isDeleted: false, hasAttachments: false },
+    });
+    expect(await within(dialog).findByText('the reply he was typing')).toBeInTheDocument();
+    expect(within(dialog).queryByText('Bob is typing…')).not.toBeInTheDocument();
+  });
+
   it('closes via the ✕ and via Escape', async () => {
     stubFetch({ rootId: 1, messages: chain() });
     const props = renderThread();

@@ -98,6 +98,11 @@ DATABASE_PATH, UPLOADS_DIR, PORT.
   `isUserConnected` (push targeting) stays real-time. Membership removals
   emit `chat:removed` to the removed user (a non-member can't receive a
   personalized `chat:updated` summary).
+- **Typing signals carry the reply target:** `typing(chatId, replyToId?)`
+  (bots: `replyToId` in POST /api/bot/typing) is relayed as-is, no DB check;
+  the thread overlay shows a typer iff that id is in its loaded chain (same
+  connected-component rule useThread uses for `message:new`). The main list
+  and chat list ignore the field — a thread reply is still a chat message.
 - **No new npm deps** without explicit approval — check what's installed first.
 - **Test/process hygiene (hard rules):** never `pkill -f` generic patterns —
   track PIDs or close servers in afterEach; never run `vitest -w` (watch mode,

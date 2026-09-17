@@ -1238,7 +1238,7 @@ function pruneExpired(map: Map<number, number>, now: number): Map<number, number
  * expired entries so the indicator disappears on its own. Returns the live keys.
  */
 function useExpiringTyping(
-  onTyping: (data: { chatId: number; userId: number }) => number | null,
+  onTyping: (data: Parameters<ServerToClientEvents['typing']>[0]) => number | null,
   clearKeyOf: (message: MessageDTO) => number | null,
   resetToken = 0,
 ): Set<number> {
@@ -1295,6 +1295,35 @@ export function useChatTyping(chatId: number, meId: number): Set<number> {
     (data) => (data.chatId === chatId && data.userId !== meId ? data.userId : null),
     (message) => (message.chatId === chatId ? message.sender.id : null),
     chatId,
+  );
+}
+
+/**
+ * User ids currently typing INTO a thread (excluding me), for the thread
+ * overlay's indicator. A typing event counts iff its `replyToId` — the message
+ * the typer's composer will reply to — is one of the thread's message ids: the
+ * same connected-component rule useThread applies to `message:new`, so "will
+ * land in this thread" is decided from ids already on hand, no server walk.
+ * Chat-level typing (no replyToId, or a reply elsewhere) is ignored here; the
+ * main list keeps showing it. Same 4s expiry, clears the instant the typer's
+ * message lands in the chat, and wipes when the thread anchor changes.
+ */
+export function useThreadTyping(
+  chatId: number,
+  meId: number,
+  threadIds: ReadonlySet<number>,
+  anchorId: number,
+): Set<number> {
+  return useExpiringTyping(
+    (data) =>
+      data.chatId === chatId &&
+      data.userId !== meId &&
+      data.replyToId !== undefined &&
+      threadIds.has(data.replyToId)
+        ? data.userId
+        : null,
+    (message) => (message.chatId === chatId ? message.sender.id : null),
+    anchorId,
   );
 }
 

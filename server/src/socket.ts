@@ -38,6 +38,22 @@ export interface SocketHandle {
 }
 
 /**
+ * The `typing` payload relayed to other members. `replyToId` rides along only
+ * when it is a well-formed message id (positive integer) — anything else,
+ * including the `undefined` from clients predating the field, is dropped so
+ * receivers see a clean chat-level signal.
+ */
+function typingPayload(
+  chatId: number,
+  userId: number,
+  replyToId: unknown,
+): { chatId: number; userId: number; replyToId?: number } {
+  return typeof replyToId === 'number' && Number.isInteger(replyToId) && replyToId > 0
+    ? { chatId, userId, replyToId }
+    : { chatId, userId };
+}
+
+/**
  * Extract one cookie's value from a raw `Cookie` header without pulling in a
  * cookie-parsing dependency (the handshake gives us the header, not req.cookies).
  */
@@ -139,13 +155,18 @@ export function initSocket(
     // Client -> server typing indicator: relay a transient "typing" signal to
     // every OTHER member of the chat. Verify membership (cheap lookup) so a
     // non-member can't spam a chat; invalid/non-member input is ignored silently.
-    socket.on('typing', (chatId) => {
+    // The optional replyToId (the message the typer's send will reply to) is
+    // passed through when well-formed — no DB check: only members reach here,
+    // and receivers merely compare it against thread ids they already hold.
+    // Clients predating the field send the bare chatId (replyToId undefined).
+    socket.on('typing', (chatId, replyToId) => {
       if (typeof chatId !== 'number') return;
       const chat = getChatForMember(db, chatId, userId);
       if (!chat) return;
+      const payload = typingPayload(chat.id, userId, replyToId);
       for (const id of getMemberIds(db, chat.id)) {
         if (id === userId) continue;
-        io.to(`user:${id}`).emit('typing', { chatId: chat.id, userId });
+        io.to(`user:${id}`).emit('typing', payload);
       }
     });
 
@@ -221,10 +242,11 @@ export function initSocket(
   // A BOT is "typing" (POST /api/bot/typing → bus). Relayed to every OTHER
   // member exactly like the human socket `typing` handler above — same event
   // name and payload, so clients can't tell bots and humans apart here.
-  events.on('typing', ({ chat, memberIds, userId }) => {
+  events.on('typing', ({ chat, memberIds, userId, replyToId }) => {
+    const payload = typingPayload(chat.id, userId, replyToId);
     for (const id of memberIds) {
       if (id === userId) continue;
-      io.to(`user:${id}`).emit('typing', { chatId: chat.id, userId });
+      io.to(`user:${id}`).emit('typing', payload);
     }
   });
 

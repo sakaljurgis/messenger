@@ -523,6 +523,24 @@ describe('POST /api/bot/typing', () => {
     expect(res.body.error).toBe('chatId is required');
   });
 
+  it('forwards a well-formed replyToId on the bus event and drops a malformed one', async () => {
+    const seen: TypingEvent[] = [];
+    events.on('typing', (e) => seen.push(e));
+
+    expect((await botTyping(apiToken, { chatId: dmId, replyToId: 42 })).status).toBe(204);
+    expect(seen[0]!.replyToId).toBe(42);
+
+    // Garbage is decoration on the receiving side — dropped, not rejected.
+    expect((await botTyping(apiToken, { chatId: dmId, replyToId: 'nope' })).status).toBe(204);
+    expect(seen[1]!.replyToId).toBeUndefined();
+    expect((await botTyping(apiToken, { chatId: dmId, replyToId: -3 })).status).toBe(204);
+    expect(seen[2]!.replyToId).toBeUndefined();
+
+    // Omitted (a plain, non-reply message) stays absent.
+    expect((await botTyping(apiToken, { chatId: dmId })).status).toBe(204);
+    expect(seen[3]!.replyToId).toBeUndefined();
+  });
+
   it('returns 404 (no leak) for a chat the bot is not a member of', async () => {
     const bob = await register(app, 'bob@example.com', 'Bob');
     const otherDm = (await alice.agent.post('/api/chats').send({ userId: bob.user.id })).body.chat

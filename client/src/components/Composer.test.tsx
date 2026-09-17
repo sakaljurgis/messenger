@@ -158,6 +158,9 @@ describe('Composer typing signal', () => {
   beforeEach(() => {
     // Prior describes' keystrokes also emit 'typing'; start each case from zero.
     socketMock.emit.mockClear();
+    // And from an empty draft: a restored draft equal to the typed value would
+    // swallow the change event (React dedupes same-value changes).
+    window.localStorage.clear();
   });
 
   it('emits typing at most once per 2s for rapid keystrokes', () => {
@@ -192,6 +195,79 @@ describe('Composer typing signal', () => {
     fireEvent.change(input, { target: { value: '' } }); // cleared → no emit
     expect(socketMock.emit).toHaveBeenCalledTimes(1);
     expect(socketMock.emit).toHaveBeenCalledWith('typing', 10);
+  });
+
+  /** A message from Alice to reply to (the banner target). */
+  const aliceMessage: MessageDTO = {
+    id: 5,
+    chatId: 10,
+    sender: alice,
+    content: 'question?',
+    mentions: [],
+    attachments: [],
+    reactions: [],
+    replyTo: null,
+    createdAt: new Date(2026, 8, 17, 12, 0, 0).toISOString(),
+    editedAt: null,
+    isDeleted: false,
+  };
+
+  it('names the reply target: the thread root (fixedReplyToId) or the Reply banner message', () => {
+    // Thread composer — every signal points at the thread root, so a member
+    // with that thread open sees the typing inside it.
+    const { unmount } = render(
+      <Composer onSend={vi.fn()} members={[me, alice]} meId={me.id} chatId={10} fixedReplyToId={77} />,
+    );
+    fireEvent.change(screen.getByPlaceholderText('Aa'), { target: { value: 'h' } });
+    expect(socketMock.emit).toHaveBeenCalledWith('typing', 10, 77);
+    unmount();
+    socketMock.emit.mockClear();
+    window.localStorage.clear(); // drop the 'h' draft so the next 'h' is a real change
+
+    // Main composer with a Reply banner — the quoted message is the target.
+    render(
+      <Composer
+        onSend={vi.fn()}
+        members={[me, alice]}
+        meId={me.id}
+        chatId={10}
+        replyingTo={aliceMessage}
+        onCancelReply={vi.fn()}
+      />,
+    );
+    fireEvent.change(screen.getByPlaceholderText('Aa'), { target: { value: 'h' } });
+    expect(socketMock.emit).toHaveBeenCalledWith('typing', 10, 5);
+  });
+
+  it('re-arms the throttle when the reply target changes so the new destination is announced at once', () => {
+    let now = 10_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      const props = { onSend: vi.fn(), members: [me, alice], meId: me.id, chatId: 10 };
+      const { rerender } = render(<Composer {...props} replyingTo={null} />);
+      const input = screen.getByPlaceholderText('Aa');
+
+      fireEvent.change(input, { target: { value: 'h' } });
+      expect(socketMock.emit).toHaveBeenCalledTimes(1);
+      expect(socketMock.emit).toHaveBeenLastCalledWith('typing', 10);
+
+      // Reply tapped 500ms in — still inside the 2s window, yet the next
+      // keystroke must go out immediately with the new target.
+      now += 500;
+      rerender(<Composer {...props} replyingTo={aliceMessage} onCancelReply={vi.fn()} />);
+      fireEvent.change(input, { target: { value: 'he' } });
+      expect(socketMock.emit).toHaveBeenCalledTimes(2);
+      expect(socketMock.emit).toHaveBeenLastCalledWith('typing', 10, 5);
+
+      // Reply cancelled: likewise, the next keystroke re-announces plain chat typing.
+      now += 500;
+      rerender(<Composer {...props} replyingTo={null} />);
+      fireEvent.change(input, { target: { value: 'hel' } });
+      expect(socketMock.emit).toHaveBeenCalledTimes(3);
+      expect(socketMock.emit).toHaveBeenLastCalledWith('typing', 10);
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 });
 

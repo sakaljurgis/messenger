@@ -161,7 +161,16 @@ export function botApiRouter(db: Db, events: ChatEvents): Router {
       res.status(404).json({ error: 'Chat not found' });
       return;
     }
-    events.emit('typing', { chat, memberIds: getMemberIds(db, chat.id), userId: req.bot!.id });
+    // Optional thread hint (BotTypingRequest.replyToId): a malformed value is
+    // dropped rather than rejected — the chat-level indicator is still worth
+    // relaying, and the field is decoration on the receiving side.
+    const replyToId = parseId((req.body as { replyToId?: unknown })?.replyToId) ?? undefined;
+    events.emit('typing', {
+      chat,
+      memberIds: getMemberIds(db, chat.id),
+      userId: req.bot!.id,
+      replyToId,
+    });
     res.status(204).end();
   });
 

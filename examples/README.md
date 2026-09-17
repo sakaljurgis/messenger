@@ -136,6 +136,12 @@ persisted, and clients expire the indicator after a few seconds: a bot doing
 slow work (say, an LLM call) should re-send every ~3 s until done. Non-member
 → `404`, missing `chatId` → `400`.
 
+Add `"replyToId": <messageId>` — the message your coming reply will target
+(the same value you'll put on the send) — and a member who has that message's
+**thread view** open sees the indicator inside the thread too; the chat-level
+indicator shows either way. Omit it for a plain, non-reply message. A
+malformed value is dropped, not rejected (still `204`).
+
 ## 5. Identity — `GET /api/bot/me`
 
 Returns the calling bot's own `UserDTO` (`{ "user": { id, displayName, isBot,

@@ -260,6 +260,13 @@ export interface BotScheduleMessageRequest extends ScheduleMessageRequest {
  */
 export interface BotTypingRequest {
   chatId: number;
+  /**
+   * The message the coming reply will target (what `replyToId` on the send
+   * will be). Lets a member who has that message's thread open see the
+   * indicator inside the thread view; the chat-level indicator shows either
+   * way. Omit for a plain (non-reply) message.
+   */
+  replyToId?: number;
 }
 
 /** POST /api/chats/:id/scheduled — queue a send-later message. */
@@ -392,8 +399,14 @@ export interface ServerToClientEvents {
   'chat:removed': (data: { chatId: number }) => void;
   /** A member's read marker advanced in a chat (never fires on a no-op/backwards read). */
   'read:updated': (data: { chatId: number; userId: number; lastReadMessageId: number }) => void;
-  /** A member is typing in a chat — a transient signal relayed to the chat's other members. */
-  'typing': (data: { chatId: number; userId: number }) => void;
+  /**
+   * A member is typing in a chat — a transient signal relayed to the chat's
+   * other members. `replyToId` is the message their composer will reply to
+   * (thread composer → the thread root; Reply banner → the quoted message);
+   * a thread view shows the typer iff that id is in its chain. Absent for a
+   * plain message (and from clients predating the field).
+   */
+  'typing': (data: { chatId: number; userId: number; replyToId?: number }) => void;
   /** A user's presence flipped online/offline (offline is debounced past a short grace window). */
   'presence': (data: { userId: number; online: boolean }) => void;
   /** One-shot snapshot of who is currently online, pushed to each socket on connect. */
@@ -401,5 +414,6 @@ export interface ServerToClientEvents {
 }
 
 export interface ClientToServerEvents {
-  typing: (chatId: number) => void;
+  /** I'm typing in `chatId`; `replyToId` = the message my send will reply to, if any. */
+  typing: (chatId: number, replyToId?: number) => void;
 }

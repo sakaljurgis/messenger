@@ -29,6 +29,7 @@ import Lightbox from '../components/Lightbox';
 import MessageRow, { buildRows } from '../components/MessageRow';
 import PdfViewer from '../components/PdfViewer';
 import ThreadView from '../components/ThreadView';
+import TypingIndicator, { typingDisplayNames } from '../components/TypingIndicator';
 
 const NEAR_BOTTOM_PX = 100;
 
@@ -87,41 +88,6 @@ function UnreadDivider() {
       <div className="h-px flex-1 bg-red-400" />
       <span className="text-xs font-semibold text-red-500">New messages</span>
       <div className="h-px flex-1 bg-red-400" />
-    </div>
-  );
-}
-
-/** "Ana is typing…", "Ana and Ben are typing…", "Ana, Ben and Cara are typing…". */
-function typingLabel(names: string[]): string {
-  if (names.length === 1) return `${names[0]} is typing…`;
-  if (names.length === 2) return `${names[0]} and ${names[1]} are typing…`;
-  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]} are typing…`;
-}
-
-/**
- * Messenger-style typing bubble: a small gray pill with three staggered bouncing
- * dots and a tiny label. Rendered below the last message, inside the scroll area,
- * so it never yanks the viewport around. Nothing shows when no one is typing.
- */
-function TypingIndicator({ names, isGroup }: { names: string[]; isGroup: boolean }) {
-  if (names.length === 0) return null;
-  return (
-    <div className="mt-2 flex justify-start px-3" aria-live="polite">
-      <div className="flex items-end gap-2">
-        {isGroup && <div className="w-8 flex-shrink-0" />}
-        <div className="flex flex-col items-start gap-0.5">
-          <div className="flex items-center gap-1 rounded-2xl bg-gray-200 px-3.5 py-3 dark:bg-gray-700">
-            {[0, 1, 2].map((i) => (
-              <span
-                key={i}
-                className="h-2 w-2 animate-bounce rounded-full bg-gray-400 dark:bg-gray-500"
-                style={{ animationDelay: `${i * 0.15}s` }}
-              />
-            ))}
-          </div>
-          <span className="ml-1 text-[10px] text-gray-400 dark:text-gray-500">{typingLabel(names)}</span>
-        </div>
-      </div>
     </div>
   );
 }
@@ -346,10 +312,7 @@ export default function ChatPage() {
   // (no presence dot there — dmOther stays undefined so otherOnline is false).
   const dmPeer =
     chat && !isGroup ? (dmOther ?? chat.members.find((m) => m.id === meId)) : undefined;
-  const typingIds = useChatTyping(chatId, meId);
-  const typingNames = [...typingIds]
-    .map((id) => members.find((m) => m.id === id)?.displayName)
-    .filter((name): name is string => Boolean(name));
+  const typingNames = typingDisplayNames(useChatTyping(chatId, meId), members);
   // Anchor message id -> members whose read position lands there. Recomputed
   // from live state (messages + chat.members, which useChat patches in place
   // on `read:updated`), so receipts move on their own without extra plumbing.

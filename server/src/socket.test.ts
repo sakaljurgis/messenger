@@ -287,6 +287,38 @@ describe('Socket.IO real-time', () => {
     expect(aliceGotTyping).toBe(false);
   });
 
+  it('passes the reply target (thread hint) through with a typing signal', async () => {
+    const alice = await register(ctx.app, 'alice@example.com', 'Alice');
+    const bob = await register(ctx.app, 'bob@example.com', 'Bob');
+
+    const dm = await request(ctx.app)
+      .post('/api/chats')
+      .set('Cookie', alice.cookie)
+      .send({ userId: bob.user.id });
+    const chatId = dm.body.chat.id as number;
+
+    const aliceSocket = connect(alice.cookie);
+    const bobSocket = connect(bob.cookie);
+    await Promise.all([waitConnect(aliceSocket), waitConnect(bobSocket)]);
+
+    // Alice types in the thread of message 42 (or with a Reply banner on it).
+    const bobReceived = waitFor<{ chatId: number; userId: number; replyToId?: number }>(
+      bobSocket,
+      'typing',
+    );
+    aliceSocket.emit('typing', chatId, 42);
+    expect(await bobReceived).toEqual({ chatId, userId: alice.user.id, replyToId: 42 });
+
+    // A malformed target is dropped, but the chat-level signal still relays
+    // (this is also the shape a client predating the field produces).
+    const bobReceivedPlain = waitFor<{ chatId: number; userId: number; replyToId?: number }>(
+      bobSocket,
+      'typing',
+    );
+    aliceSocket.emit('typing', chatId, 'nope' as never);
+    expect(await bobReceivedPlain).toEqual({ chatId, userId: alice.user.id });
+  });
+
   it('ignores a typing signal for a chat the sender is not a member of', async () => {
     const alice = await register(ctx.app, 'alice@example.com', 'Alice');
     const bob = await register(ctx.app, 'bob@example.com', 'Bob');
@@ -340,6 +372,20 @@ describe('Socket.IO real-time', () => {
 
     expect(res.status).toBe(204);
     expect(await aliceReceived).toEqual({ chatId, userId: bot.id });
+
+    // With a reply target (the bot is answering message 7 → its thread) the
+    // hint rides along in the same event.
+    const aliceReceivedThread = waitFor<{ chatId: number; userId: number; replyToId?: number }>(
+      aliceSocket,
+      'typing',
+    );
+    const res2 = await request(ctx.app)
+      .post('/api/bot/typing')
+      .set('Authorization', `Bearer ${apiToken}`)
+      .send({ chatId, replyToId: 7 });
+
+    expect(res2.status).toBe(204);
+    expect(await aliceReceivedThread).toEqual({ chatId, userId: bot.id, replyToId: 7 });
   });
 
   it('sends a presence:state snapshot that lists an already-connected user', async () => {
